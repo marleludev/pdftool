@@ -6,6 +6,7 @@ import fitz
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QMouseEvent
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -34,6 +35,11 @@ BUILTIN_FONTS = {
     "Courier": "cour",
     "Courier Bold": "cobo",
 }
+
+# maps regular ↔ bold for the toggle checkbox
+_TO_BOLD    = {"helv": "hebo", "heob": "heob", "tiro": "tibo", "tiit": "tibi", "cour": "cobo"}
+_TO_REGULAR = {"hebo": "helv", "tibo": "tiro", "tibi": "tiit", "cobo": "cour"}
+_BOLD_CODES = set(_TO_REGULAR.keys())
 
 
 def _int_to_rgb(c: int) -> tuple[float, float, float]:
@@ -77,6 +83,14 @@ class TextEditDialog(QDialog):
                 break
         form.addRow("Font:", self._font_combo)
 
+        # bold toggle
+        is_bold = bool(span.get("flags", 0) & 16) or BUILTIN_FONTS.get(
+            self._font_combo.currentText(), "") in _BOLD_CODES
+        self._bold_cb = QCheckBox("Bold")
+        self._bold_cb.setChecked(is_bold)
+        self._bold_cb.toggled.connect(self._on_bold_toggled)
+        form.addRow("Style:", self._bold_cb)
+
         # font size
         self._size_spin = QDoubleSpinBox()
         self._size_spin.setRange(4.0, 200.0)
@@ -98,6 +112,14 @@ class TextEditDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
+
+    def _on_bold_toggled(self, checked: bool) -> None:
+        current_code = BUILTIN_FONTS.get(self._font_combo.currentText(), "")
+        target_code = _TO_BOLD.get(current_code, current_code) if checked else _TO_REGULAR.get(current_code, current_code)
+        for label, code in BUILTIN_FONTS.items():
+            if code == target_code:
+                self._font_combo.setCurrentText(label)
+                break
 
     def _pick_color(self) -> None:
         qc = _rgb_to_qcolor(*self._color)

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import Qt, QBuffer, QIODevice, QSettings
 from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -18,9 +19,63 @@ from PyQt6.QtWidgets import (
 )
 
 
+# Theme-name → qtawesome MDI icon name
+_QTA: dict[str, str] = {
+    "document-open":           "mdi.folder-open",
+    "document-save":           "mdi.content-save",
+    "document-save-as":        "mdi.content-save-edit",
+    "document-close":          "mdi.close-circle-outline",
+    "document-open-recent":    "mdi.history",
+    "document-properties":     "mdi.file-cog",
+    "document-edit":           "mdi.file-edit",
+    "document-export":         "mdi.file-export",
+    "document-revert":         "mdi.file-restore",
+    "document-sign":           "mdi.draw",
+    "edit-undo":               "mdi.undo",
+    "edit-redo":               "mdi.redo",
+    "edit-paste":              "mdi.content-paste",
+    "edit-select":             "mdi.cursor-default-click",
+    "edit-clear":              "mdi.eraser",
+    "insert-text":             "mdi.format-text",
+    "insert-image":            "mdi.image-plus",
+    "draw-rectangle":          "mdi.rectangle-outline",
+    "draw-highlight":          "mdi.marker",
+    "draw-freehand":           "mdi.draw",
+    "draw-calligraph":         "mdi.pen",
+    "transform-move":          "mdi.cursor-move",
+    "input-mouse":             "mdi.cursor-default",
+    "object-order-back":       "mdi.arrange-send-to-back",
+    "object-order-front":      "mdi.arrange-bring-to-front",
+    "zoom-in":                 "mdi.magnify-plus",
+    "zoom-out":                "mdi.magnify-minus",
+    "zoom-fit-best":           "mdi.fit-to-page-outline",
+    "scanner":                 "mdi.scanner",
+    "image-x-generic":         "mdi.image",
+    "image-x-raw":             "mdi.image",
+    "user-trash":              "mdi.trash-can",
+    "application-certificate": "mdi.certificate",
+    "mail-signed":             "mdi.draw",
+    "document-sign":           "mdi.draw",
+}
+
+
+def _qta_icon(name: str) -> QIcon:
+    qta_name = _QTA.get(name)
+    if not qta_name:
+        return QIcon()
+    try:
+        import qtawesome as qta
+        return qta.icon(qta_name, color="#444444")
+    except Exception:
+        return QIcon()
+
+
 def _icon(theme: str, fallback_sp=None) -> QIcon:
-    """Return theme icon; fall back to QStyle standard pixmap if theme icon missing."""
+    """Return theme icon; fall back to qtawesome then QStyle standard pixmap."""
     ic = QIcon.fromTheme(theme)
+    if not ic.isNull():
+        return ic
+    ic = _qta_icon(theme)
     if not ic.isNull():
         return ic
     if fallback_sp is not None:
@@ -29,8 +84,23 @@ def _icon(theme: str, fallback_sp=None) -> QIcon:
             return style.standardIcon(fallback_sp)
     return QIcon()
 
+
+def _icon_any(*names: str) -> QIcon:
+    """Return first non-null icon from theme names, then qtawesome fallbacks."""
+    for name in names:
+        ic = QIcon.fromTheme(name)
+        if not ic.isNull():
+            return ic
+    for name in names:
+        ic = _qta_icon(name)
+        if not ic.isNull():
+            return ic
+    return QIcon()
+
+import fitz
 from core.document import PDFDocument
 from tools.annotate import HighlightTool, RectAnnotateTool
+from tools.image_insert import ImageInsertTool
 from tools.select import SelectTool
 from tools.text_add import TextAddTool
 from tools.text_edit import TextEditTool
@@ -40,11 +110,21 @@ from ui.thumbnail_panel import ThumbnailPanel
 
 MAX_RECENT = 10
 
+_SIG_DIR        = Path.home() / ".config" / "PDFTool" / "signatures"
+_SIG_MAX_W      = 5 * 72 / 2.54   # 5 cm in PDF points ≈ 141.7
+_SCAN_DPI_KEY   = "scanDpi"
+_SCAN_DPI_DEFAULT = 150
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("PDF Tool")
+        _icon_path = Path(__file__).parent.parent / "pdftool.png"
+        if _icon_path.exists():
+            self.setWindowIcon(QIcon(str(_icon_path)))
+        _ver = QApplication.applicationVersion()
+        if _ver:
+            self.setWindowTitle(f"PDF Tool {_ver}")
         self.resize(1280, 900)
 
         self._doc: PDFDocument | None = None
@@ -104,14 +184,31 @@ class MainWindow(QMainWindow):
         edit_menu = mb.addMenu("&Edit")
         self._act_undo = QAction(_icon("edit-undo", SP.SP_ArrowBack), "&Undo", self, shortcut=QKeySequence.StandardKey.Undo)
         self._act_redo = QAction(_icon("edit-redo", SP.SP_ArrowForward), "&Redo", self, shortcut=QKeySequence.StandardKey.Redo)
+        self._act_img_paste = QAction(_icon("edit-paste"), "&Paste Image", self, shortcut=QKeySequence.StandardKey.Paste)
+        self._act_img_paste.setToolTip("Paste image from clipboard (click to place)")
         edit_menu.addActions([self._act_undo, self._act_redo])
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._act_img_paste)
 
         doc_menu = mb.addMenu("&Document")
         self._act_properties = QAction(
             _icon("document-properties"), "&Properties…", self,
             shortcut=QKeySequence("Ctrl+Shift+P"),
         )
+        self._act_scan = QAction(
+            _icon_any("scanner", "image-x-generic", "document-export"),
+            "Convert to &Scanned…", self,
+        )
+        self._act_scan.setToolTip("Rasterize all pages to images, strip fonts and vectors, minimize file size")
+        self._act_prune = QAction(
+            _icon_any("edit-clear", "user-trash", "document-revert"),
+            "&Prune…", self,
+        )
+        self._act_prune.setToolTip("Remove unused fonts, metadata, thumbnails, attachments to reduce file size")
         doc_menu.addAction(self._act_properties)
+        doc_menu.addSeparator()
+        doc_menu.addAction(self._act_scan)
+        doc_menu.addAction(self._act_prune)
 
         view_menu = mb.addMenu("&View")
         self._act_zoom_in  = QAction(_icon("zoom-in"),       "Zoom &In",   self, shortcut=QKeySequence("Ctrl+="))
@@ -145,10 +242,32 @@ class MainWindow(QMainWindow):
         self._act_highlight = QAction(_icon("draw-highlight"), "Highlight", self, checkable=True)
         self._act_highlight.setToolTip("Highlight text region")
 
+        self._act_send_back  = QAction(_icon("object-order-back"),  "Send to Back",    self, shortcut=QKeySequence("["))
+        self._act_bring_front = QAction(_icon("object-order-front"), "Bring to Front",  self, shortcut=QKeySequence("]"))
+        self._act_send_back.setToolTip("Send selected image behind all other content  [")
+        self._act_bring_front.setToolTip("Bring selected image in front of all other content  ]")
+
+        self._act_img_file = QAction(_icon("insert-image"), "Insert Image", self,
+                                     shortcut=QKeySequence("Ctrl+Shift+I"))
+        self._act_img_file.setToolTip("Insert image from file (click to place) — Ctrl+V to paste from clipboard")
+
+        _sign_icon = QIcon(str(Path(__file__).parent.parent / "sign.png"))
+        self._act_signatures = QAction(
+            _sign_icon if not _sign_icon.isNull() else _icon_any("application-certificate", "draw-freehand", "document-edit"),
+            "Signatures…", self,
+            shortcut=QKeySequence("Ctrl+Shift+G"))
+        self._act_signatures.setToolTip("Manage and place signatures (Ctrl+Shift+G)")
+
         for act in (self._act_pan, self._act_select, self._act_text, self._act_text_edit, self._act_rect, self._act_highlight):
             tb.addAction(act)
             act.triggered.connect(self._on_tool_selected)
 
+        tb.addSeparator()
+        tb.addAction(self._act_img_file)
+        tb.addAction(self._act_send_back)
+        tb.addAction(self._act_bring_front)
+        tb.addSeparator()
+        tb.addAction(self._act_signatures)
         tb.addSeparator()
         tb.addAction(self._act_zoom_in)
         tb.addAction(self._act_zoom_out)
@@ -184,6 +303,13 @@ class MainWindow(QMainWindow):
         self._act_fit.triggered.connect(self._canvas.fit_width)
         self._thumb_panel.page_selected.connect(self._canvas.scroll_to_page)
         self._canvas.page_changed.connect(self._on_page_changed)
+        self._act_img_file.triggered.connect(self._insert_image_file)
+        self._act_img_paste.triggered.connect(self._insert_image_clipboard)
+        self._act_send_back.triggered.connect(lambda: self._image_zorder(to_back=True))
+        self._act_bring_front.triggered.connect(lambda: self._image_zorder(to_back=False))
+        self._act_signatures.triggered.connect(self._open_signatures)
+        self._act_scan.triggered.connect(self._convert_to_scanned)
+        self._act_prune.triggered.connect(self._prune_document)
 
     # ── recent files ──────────────────────────────────────────────────────────
 
@@ -296,6 +422,164 @@ class MainWindow(QMainWindow):
         self._thumb_panel._list.clear()
         self.setWindowTitle("PDF Tool")
         self._status_page.setText("No document")
+
+    # ── image insert ──────────────────────────────────────────────────────────
+
+    def _start_image_insert(self, img_bytes: bytes) -> None:
+        if not self._doc:
+            QMessageBox.warning(self, "No document", "Open a PDF first.")
+            return
+        try:
+            pm = fitz.Pixmap(img_bytes)
+            w, h = pm.width, pm.height
+        except Exception:
+            QMessageBox.critical(self, "Image error", "Cannot read image dimensions.")
+            return
+        for act in self._tool_actions:
+            act.setChecked(False)
+        self._canvas.set_tool(ImageInsertTool(self._canvas, img_bytes, w, h))
+
+    def _image_zorder(self, to_back: bool) -> None:
+        tool = self._canvas._current_tool
+        if isinstance(tool, SelectTool):
+            tool.set_image_zorder(to_back)
+
+    def _insert_image_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Insert Image", str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp)"
+        )
+        if not path:
+            return
+        self._start_image_insert(Path(path).read_bytes())
+
+    def _insert_image_clipboard(self) -> None:
+        clipboard = QApplication.clipboard()
+        qimg = clipboard.image()
+        if qimg.isNull():
+            QMessageBox.warning(self, "Clipboard", "No image found in clipboard.")
+            return
+        buf = QBuffer()
+        buf.open(QIODevice.OpenMode.WriteOnly)
+        qimg.save(buf, "PNG")
+        self._start_image_insert(bytes(buf.data()))
+
+    # ── signature ─────────────────────────────────────────────────────────────
+
+    def _open_signatures(self) -> None:
+        from ui.signature_dialog import SignatureDialog
+        dlg = SignatureDialog(self)
+        dlg.place_requested.connect(self._place_signature_slot)
+        dlg.exec()
+
+    def _place_signature_slot(self, slot: int) -> None:
+        if not self._doc:
+            QMessageBox.warning(self, "No document", "Open a PDF first.")
+            return
+        from ui.signature_dialog import sig_path
+        p = sig_path(slot)
+        if not p.exists():
+            return
+        img_bytes = p.read_bytes()
+        try:
+            pm = fitz.Pixmap(img_bytes)
+            w, h = pm.width, pm.height
+        except Exception:
+            QMessageBox.critical(self, "Signature", "Signature image is corrupted.")
+            return
+        for act in self._tool_actions:
+            act.setChecked(False)
+        self._canvas.set_tool(
+            ImageInsertTool(self._canvas, img_bytes, w, h, max_w=_SIG_MAX_W)
+        )
+
+    # ── convert to scanned ────────────────────────────────────────────────────
+
+    def _convert_to_scanned(self) -> None:
+        if not self._doc:
+            QMessageBox.warning(self, "No document", "Open a PDF first.")
+            return
+        current_dpi = int(self._settings.value(_SCAN_DPI_KEY, _SCAN_DPI_DEFAULT))
+        dpi, ok = QInputDialog.getInt(
+            self, "Convert to Scanned",
+            "Render DPI (72–600):\n"
+            "150 = good quality / small size\n"
+            "300 = print quality / larger size",
+            current_dpi, 72, 600, 25,
+        )
+        if not ok:
+            return
+        self._settings.setValue(_SCAN_DPI_KEY, dpi)
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Scanned PDF", str(Path.home()), "PDF files (*.pdf)"
+        )
+        if not out_path:
+            return
+
+        src = self._doc._doc
+        scale = dpi / 72.0
+        mat = fitz.Matrix(scale, scale)
+        new_doc = fitz.open()
+        try:
+            for i in range(len(src)):
+                page = src[i]
+                pix = page.get_pixmap(matrix=mat, alpha=False, colorspace=fitz.csRGB)
+                new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.insert_image(new_page.rect, pixmap=pix)
+            new_doc.save(
+                out_path,
+                garbage=4,      # remove all unused objects/streams
+                deflate=True,   # compress streams
+                clean=True,     # sanitize content streams
+            )
+        finally:
+            new_doc.close()
+
+        QMessageBox.information(
+            self, "Done",
+            f"Scanned PDF saved:\n{out_path}"
+        )
+
+    # ── prune ─────────────────────────────────────────────────────────────────
+
+    def _prune_document(self) -> None:
+        if not self._doc:
+            QMessageBox.warning(self, "No document", "Open a PDF first.")
+            return
+        from ui.prune_dialog import PruneDialog, analyze_for_prune
+        src = self._doc._doc
+
+        findings = analyze_for_prune(src)
+
+        try:
+            pruned_bytes = src.tobytes(garbage=4, deflate=True, clean=True)
+            pruned_size = len(pruned_bytes)
+        except Exception as e:
+            QMessageBox.critical(self, "Prune error", f"Could not compute pruned size:\n{e}")
+            return
+
+        orig_path = src.name
+        from pathlib import Path as _Path
+        orig_size = _Path(orig_path).stat().st_size if orig_path and _Path(orig_path).exists() else pruned_size
+
+        dlg = PruneDialog(self, findings, orig_size, pruned_size)
+        if dlg.exec() != PruneDialog.DialogCode.Accepted:
+            return
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Pruned PDF", str(Path.home()), "PDF files (*.pdf)"
+        )
+        if not out_path:
+            return
+
+        try:
+            Path(out_path).write_bytes(pruned_bytes)
+        except Exception as e:
+            QMessageBox.critical(self, "Save error", str(e))
+            return
+
+        QMessageBox.information(self, "Done", f"Pruned PDF saved:\n{out_path}")
 
     # ── tools ─────────────────────────────────────────────────────────────────
 
