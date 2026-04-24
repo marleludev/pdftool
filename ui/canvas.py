@@ -13,8 +13,24 @@ if TYPE_CHECKING:
     from core.document import PDFDocument
     from tools.base import AbstractTool
 
-PAGE_GAP = 20       # px between pages in scene
-RENDER_SCALE = 2.0  # base render DPI multiplier — enough headroom for 1.5× zoom
+# Layout constants
+PAGE_GAP = 20                    # px between pages in scene
+SCENE_MARGIN = 10                # px margin around content in scene rect
+
+# Rendering constants
+RENDER_SCALE = 2.0               # base render DPI multiplier — enough headroom for 1.5× zoom
+MIN_RENDER_SCALE = 1.0           # minimum render scale
+MAX_RENDER_SCALE = 5.0           # maximum render scale
+RENDER_SCALE_THRESHOLD = 0.30    # re-render when scale changes by this fraction
+
+# Zoom constants
+ZOOM_IN_FACTOR = 1.25            # zoom in multiplier
+ZOOM_OUT_FACTOR = 0.8            # zoom out multiplier (1/1.25)
+WHEEL_ZOOM_FACTOR = 1.15         # wheel zoom multiplier
+FIT_WIDTH_MARGIN = 20            # px margin when fitting to width
+
+# Scale factor for TextWriter (1.5x view scale)
+TEXT_WRITER_SCALE_FACTOR = 1.5
 
 
 class PDFCanvas(QGraphicsView):
@@ -67,7 +83,11 @@ class PDFCanvas(QGraphicsView):
             self._page_rects.append(rect)
             y_offset += rect.height() + PAGE_GAP
 
-        self._scene.setSceneRect(self._scene.itemsBoundingRect().adjusted(-10, -10, 10, 10))
+        self._scene.setSceneRect(
+            self._scene.itemsBoundingRect().adjusted(
+                -SCENE_MARGIN, -SCENE_MARGIN, SCENE_MARGIN, SCENE_MARGIN
+            )
+        )
 
     def _make_page_item(self, page_num: int, y_offset: float) -> tuple[QGraphicsPixmapItem, QRectF]:
         pix_data = self.document.render_page(page_num, self._scale)
@@ -120,17 +140,17 @@ class PDFCanvas(QGraphicsView):
     # ── zoom ──────────────────────────────────────────────────────────────────
 
     def zoom_in(self) -> None:
-        self.scale(1.25, 1.25)
+        self.scale(ZOOM_IN_FACTOR, ZOOM_IN_FACTOR)
         self._sync_render_scale()
 
     def zoom_out(self) -> None:
-        self.scale(0.8, 0.8)
+        self.scale(ZOOM_OUT_FACTOR, ZOOM_OUT_FACTOR)
         self._sync_render_scale()
 
     def fit_width(self) -> None:
         if not self._page_rects:
             return
-        vw = self.viewport().width() - 20
+        vw = self.viewport().width() - FIT_WIDTH_MARGIN
         factor = vw / self._page_rects[0].width()
         self.resetTransform()
         self.scale(factor, factor)
@@ -138,7 +158,7 @@ class PDFCanvas(QGraphicsView):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            factor = WHEEL_ZOOM_FACTOR if event.angleDelta().y() > 0 else 1 / WHEEL_ZOOM_FACTOR
             self.scale(factor, factor)
             self._sync_render_scale()
         else:
@@ -149,10 +169,10 @@ class PDFCanvas(QGraphicsView):
         if self.document is None:
             return
         view_zoom = self.transform().m11()            # current view scale factor
-        desired = max(1.0, min(view_zoom * 1.5, 5.0)) # target render scale
+        desired = max(MIN_RENDER_SCALE, min(view_zoom * TEXT_WRITER_SCALE_FACTOR, MAX_RENDER_SCALE))
 
-        if abs(desired - self._scale) / self._scale < 0.30:
-            return  # difference < 30% — not worth the re-render cost
+        if abs(desired - self._scale) / self._scale < RENDER_SCALE_THRESHOLD:
+            return  # not worth the re-render cost
 
         # save center in PDF-space coordinates (page 0 approximation)
         center_scene = self.mapToScene(self.viewport().rect().center())

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging
 import os
 import sys
 from pathlib import Path
@@ -8,14 +9,35 @@ from PyQt6.QtWidgets import QApplication
 
 from ui.mainwindow import MainWindow
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 
 def _read_version() -> str:
-    for base in (Path(__file__).parent,
-                 Path(getattr(__import__('sys'), '_MEIPASS', '.'))):
-        p = base / 'VERSION'
+    """Read version from VERSION file.
+
+    Checks both the application directory and PyInstaller bundle location.
+
+    Returns:
+        Version string from VERSION file, or '0.0.0' if not found.
+    """
+    bases = [Path(__file__).parent]
+    if hasattr(sys, "_MEIPASS"):
+        bases.append(Path(sys._MEIPASS))
+
+    for base in bases:
+        p = base / "VERSION"
         if p.exists():
-            return p.read_text().strip()
-    return '0.0.0'
+            try:
+                return p.read_text().strip()
+            except Exception as e:
+                logger.warning("Failed to read VERSION file: %s", e)
+                return "0.0.0"
+    return "0.0.0"
 
 
 def _frozen_icon_setup() -> None:

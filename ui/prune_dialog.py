@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import fitz
+
+try:
+    import qtawesome as qta
+    QTA_AVAILABLE = True
+except ImportError:
+    QTA_AVAILABLE = False
+
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -11,6 +19,16 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
 )
+
+
+def _icon(name: str) -> QIcon:
+    """Get icon from qtawesome."""
+    if QTA_AVAILABLE:
+        try:
+            return qta.icon(f"mdi.{name}", color="#555555")
+        except Exception:
+            pass
+    return QIcon()
 
 
 def _fmt_size(n: int) -> str:
@@ -155,6 +173,7 @@ class PruneDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Prune PDF")
+        self.setWindowIcon(_icon("content-cut"))
         self.setMinimumWidth(620)
 
         saving = orig_size - pruned_size

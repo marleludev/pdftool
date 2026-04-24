@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+try:
+    import qtawesome as qta
+    QTA_AVAILABLE = True
+except ImportError:
+    QTA_AVAILABLE = False
+
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -11,6 +18,16 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QGroupBox,
 )
+
+
+def _icon(name: str) -> QIcon:
+    """Get icon from qtawesome."""
+    if QTA_AVAILABLE:
+        try:
+            return qta.icon(f"mdi.{name}", color="#555555")
+        except Exception:
+            pass
+    return QIcon()
 
 
 def _parse_date(d: str) -> str:
@@ -38,6 +55,7 @@ class PropertiesDialog(QDialog):
     def __init__(self, meta: dict, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Document Properties")
+        self.setWindowIcon(_icon("file-cog"))
         self.setMinimumWidth(480)
 
         layout = QVBoxLayout(self)

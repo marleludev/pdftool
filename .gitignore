@@ -10,3 +10,5 @@ build/
 .vscode/
 *.swp
 export/
+*.pdf
+*.png

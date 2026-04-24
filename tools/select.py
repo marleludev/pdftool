@@ -530,43 +530,21 @@ class SelectTool(AbstractTool):
             if img_bytes is None:
                 return  # extraction failed — abort move to avoid losing the image
             siblings = self._capture_sibling_images(page, sel.pdf_rect, sel.xref, doc._doc)
-            page.add_redact_annot(sel.pdf_rect, fill=None)
-            page.apply_redactions(images=1, graphics=0, text=0)
-            for r, b in siblings:
-                page.insert_image(r, stream=b, overlay=True)
-            page.insert_image(new_rect, stream=img_bytes, overlay=True)
+            from core.history import MoveImageWithSiblingsCmd
+            cmd = MoveImageWithSiblingsCmd(
+                sel.page_num, sel.xref,
+                list(sel.pdf_rect), list(new_rect),
+                img_bytes, siblings,
+            )
+            self.canvas.push_command(cmd, doc)
             sel.pdf_rect = new_rect
-            self.canvas.document_modified.emit()
 
         elif sel.obj_type == "drawing" and sel.drawing is not None:
-            page = doc.get_page(sel.page_num)
-            if not strip_drawing(doc._doc, page, sel.drawing):
-                # fallback: redact with sibling preservation
-                # use tolerance-based match (exact rect== fails on floating-point)
-                tol = max((sel.drawing.get("width") or 1) * 2.0, 2.0)
-                target_rect = fitz.Rect(sel.drawing["rect"])
-                found_target = False
-                siblings: list[dict] = []
-                for d in page.get_drawings():
-                    dr = fitz.Rect(d["rect"])
-                    if not found_target and (
-                        abs(dr.x0 - target_rect.x0) < tol and
-                        abs(dr.y0 - target_rect.y0) < tol and
-                        abs(dr.x1 - target_rect.x1) < tol and
-                        abs(dr.y1 - target_rect.y1) < tol
-                    ):
-                        found_target = True
-                        continue
-                    if sel.pdf_rect.contains(dr):
-                        siblings.append(d)
-                page.add_redact_annot(sel.pdf_rect, fill=None)
-                page.apply_redactions(images=0, graphics=1, text=0)
-                for d in siblings:
-                    self._redraw_drawing(page, d, 0, 0)
-            self._redraw_drawing(page, sel.drawing, dx, dy)
+            from core.history import MoveDrawingCmd
+            cmd = MoveDrawingCmd(sel.page_num, sel.drawing, dx, dy)
+            self.canvas.push_command(cmd, doc)
+            sel.drawing = cmd._drawing
             sel.pdf_rect = new_rect
-            sel.drawing = self._shift_drawing(sel.drawing, dx, dy)
-            self.canvas.document_modified.emit()
 
         elif sel.obj_type == "text" and sel.span is not None:
             span = sel.span

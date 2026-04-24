@@ -3,8 +3,14 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+try:
+    import qtawesome as qta
+    QTA_AVAILABLE = True
+except ImportError:
+    QTA_AVAILABLE = False
+
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -21,6 +27,16 @@ _SIG_DIR = Path.home() / ".config" / "PDFTool" / "signatures"
 _NUM_SLOTS = 4
 _PREVIEW_W = 160
 _PREVIEW_H = 96
+
+
+def _icon(name: str) -> QIcon:
+    """Get icon from qtawesome."""
+    if QTA_AVAILABLE:
+        try:
+            return qta.icon(f"mdi.{name}", color="#555555")
+        except Exception:
+            pass
+    return QIcon()
 
 
 def sig_path(slot: int) -> Path:
@@ -40,9 +56,9 @@ class _SlotWidget(QGroupBox):
             "border: 1px solid #bbb; background: #f5f5f5; border-radius: 3px;"
         )
 
-        self._btn_load = QPushButton("Load…")
-        self._btn_clear = QPushButton("Clear")
-        self._btn_place = QPushButton("Place")
+        self._btn_load = QPushButton(_icon("folder-open"), " Load…")
+        self._btn_clear = QPushButton(_icon("close"), " Clear")
+        self._btn_place = QPushButton(_icon("draw"), " Place")
         self._btn_place.setStyleSheet("font-weight: bold;")
 
         btn_row = QHBoxLayout()
@@ -106,6 +122,7 @@ class SignatureDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Signatures")
+        self.setWindowIcon(_icon("draw"))
         self.setModal(True)
 
         grid = QGridLayout()
