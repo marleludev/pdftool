@@ -118,6 +118,8 @@ class PDFCanvas(QGraphicsView):
     # ── coordinate conversion ─────────────────────────────────────────────────
 
     def scene_to_pdf(self, page_num: int, scene_pos: QPointF) -> fitz.Point:
+        # Scene coords are render pixels (self._scale px per PDF point).
+        # Subtract the page origin so (0,0) maps to the top-left of the page.
         origin = self._page_rects[page_num].topLeft()
         return fitz.Point(
             (scene_pos.x() - origin.x()) / self._scale,
@@ -165,7 +167,13 @@ class PDFCanvas(QGraphicsView):
             super().wheelEvent(event)
 
     def _sync_render_scale(self) -> None:
-        """Re-render pages when effective resolution drifts far from 1:1 pixels."""
+        """Re-render pages when effective resolution drifts far from 1:1 pixels.
+
+        The view applies a QTransform zoom on top of already-rendered bitmaps.
+        When the user zooms far enough that the bitmaps look pixelated (or we're
+        wasting memory on too-large bitmaps after zoom-out), we re-render at a
+        new _scale and reset the view transform back to 1:1.
+        """
         if self.document is None:
             return
         view_zoom = self.transform().m11()            # current view scale factor
@@ -174,17 +182,17 @@ class PDFCanvas(QGraphicsView):
         if abs(desired - self._scale) / self._scale < RENDER_SCALE_THRESHOLD:
             return  # not worth the re-render cost
 
-        # save center in PDF-space coordinates (page 0 approximation)
         center_scene = self.mapToScene(self.viewport().rect().center())
 
         old_render = self._scale
         self._scale = desired
         if self._current_tool:
-            self._current_tool.cancel()  # prevent dangling item refs after scene.clear()
+            self._current_tool.cancel()  # prevent dangling scene item refs after clear()
         self.resetTransform()
         self._render_all_pages()
 
-        # restore scroll position
+        # Scene coords scale proportionally with _scale, so multiply the saved
+        # center position by the ratio to land on the same visual spot.
         ratio = desired / old_render
         self.centerOn(center_scene.x() * ratio, center_scene.y() * ratio)
 
@@ -235,8 +243,10 @@ class PDFCanvas(QGraphicsView):
             if key == Qt.Key.Key_Escape:
                 self._current_tool.cancel()
                 return
-            # A scene item (e.g. inline text editor) has focus — let the scene route
-            # the event to that item; don't intercept typing/backspace/etc.
+            # When an inline editor (QGraphicsProxyWidget) is active it holds
+            # scene focus.  Routing through super() lets Qt deliver the keystroke
+            # to that widget instead of our tool handler (avoids eating backspace
+            # while the user types in an inline field).
             if self._scene.focusItem() is not None:
                 super().keyPressEvent(event)
                 return

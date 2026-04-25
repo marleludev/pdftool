@@ -15,6 +15,15 @@ from tools.base import AbstractTool
 if TYPE_CHECKING:
     from ui.canvas import PDFCanvas
 
+def _shift_verts(verts: list, dx: float, dy: float) -> list:
+    """Translate vertices by (dx, dy). Handles flat and nested (ink) formats."""
+    if not verts:
+        return []
+    if isinstance(verts[0], list):  # ink: list of strokes
+        return [[(pt[0] + dx, pt[1] + dy) for pt in stroke] for stroke in verts]
+    return [(pt[0] + dx, pt[1] + dy) for pt in verts]
+
+
 _HIT_TOLERANCE = 5        # PDF points of extra hit area around object rects
 _TEXT_HIT_TOLERANCE = 2  # tighter tolerance for text spans (bboxes tend to overlap)
 _DRAG_THRESHOLD = 3       # PDF points of movement before drag is confirmed
@@ -148,7 +157,7 @@ class SelectTool(AbstractTool):
                 self._sel.pdf_rect.x0 + dx, self._sel.pdf_rect.y0 + dy,
                 self._sel.pdf_rect.x1 + dx, self._sel.pdf_rect.y1 + dy,
             )
-            self._apply_move(new_rect, dx, dy)
+            self._apply_move(new_rect, dx, dy)  # pushes undo command
         self._dragging = False
         self._drag_confirmed = False
 
@@ -176,6 +185,11 @@ class SelectTool(AbstractTool):
         if doc is None:
             return None
         page = doc.get_page(page_num)
+
+        # Priority order: annotations > images > drawings > text.
+        # Text is last because its bboxes overlap images and annotations in
+        # almost every real document; clicking a highlight should select the
+        # annotation, not the underlying text span.
 
         # annotations first — pick closest center among all hits (handles overlaps)
         best_annot_dist = float("inf")
@@ -239,7 +253,7 @@ class SelectTool(AbstractTool):
             if r.is_empty:
                 continue
             area = r.width * r.height
-            if area > page_area * 0.5:  # skip drawings covering >50% of page (background)
+            if area > page_area * 0.5:  # skip full-page background fills (borders, shading)
                 continue
             # skip white drawings — legacy erase-marks in older files
             c = drw.get("color")
@@ -512,16 +526,18 @@ class SelectTool(AbstractTool):
 
         if sel.obj_type == "annot" and sel.xref is not None and sel.snap is not None:
             old_verts = sel.snap["vertices"]
-            new_verts = [(x + dx, y + dy) for x, y in old_verts] if old_verts else []
+            new_verts = _shift_verts(old_verts, dx, dy)
             cmd = MoveAnnotCmd(
                 sel.page_num, sel.xref,
                 list(sel.pdf_rect), old_verts,
                 list(new_rect), new_verts,
             )
             self.canvas.push_command(cmd, doc)
-            # update selection state
             sel.pdf_rect = new_rect
             if sel.snap:
+                # keep snap in sync so a second drag on the same selection
+                # has up-to-date geometry (MoveAnnotCmd may assign a new xref
+                # if delete+recreate was used for Polygon/Ink).
                 sel.snap = dict(sel.snap, rect=list(new_rect), vertices=new_verts)
 
         elif sel.obj_type == "image" and sel.xref is not None:

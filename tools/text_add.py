@@ -81,7 +81,8 @@ class TextAddTool(AbstractTool):
         if self._text_item is None or self._page_num is None or self._pdf_pos is None:
             return
 
-        # disconnect before remove to avoid double-commit on focusOut during removeItem
+        # Disconnect BEFORE removeItem: Qt fires focusOut when an item is removed
+        # from the scene, which would trigger commit_requested a second time.
         self._text_item.commit_requested.disconnect()
         self._text_item.cancel_requested.disconnect()
 

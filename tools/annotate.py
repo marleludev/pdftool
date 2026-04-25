@@ -45,7 +45,7 @@ class RectAnnotateTool(AbstractTool):
             min(self._start_pdf.x, pdf_pos.x), min(self._start_pdf.y, pdf_pos.y),
             max(self._start_pdf.x, pdf_pos.x), max(self._start_pdf.y, pdf_pos.y),
         )
-        if r.width < 5 or r.height < 5:
+        if r.width < 5 or r.height < 5:  # ignore accidental single-click
             self._reset()
             return
 
@@ -103,7 +103,7 @@ class HighlightTool(AbstractTool):
             min(self._start_pdf.x, pdf_pos.x), min(self._start_pdf.y, pdf_pos.y),
             max(self._start_pdf.x, pdf_pos.x), max(self._start_pdf.y, pdf_pos.y),
         )
-        if r.width < 5 or r.height < 5:
+        if r.width < 5 or r.height < 5:  # ignore accidental single-click
             self._reset()
             return
 

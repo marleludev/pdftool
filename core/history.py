@@ -28,6 +28,7 @@ def _capture_annot(annot: fitz.Annot) -> dict:
         "colors": dict(annot.colors),
         "border": dict(annot.border),
         "vertices": list(annot.vertices) if annot.vertices else [],
+        "opacity": annot.opacity,
         "xref": annot.xref,
     }
 
@@ -54,20 +55,55 @@ def _recreate_annot(page: fitz.Page, snap: dict) -> int:
         if stroke:
             annot.set_colors(stroke=stroke)
         annot.update()
+    elif tname == "Polygon":
+        pts = [fitz.Point(pt) for pt in snap["vertices"]]
+        annot = page.add_polygon_annot(pts)
+        stroke = snap["colors"].get("stroke")
+        if stroke:
+            annot.set_colors(stroke=stroke)
+        annot.set_border(width=snap["border"].get("width", 1.5))
+        annot.update()
+    elif tname == "Ink":
+        strokes = snap["vertices"]  # list of lists of points
+        annot = page.add_ink_annot(strokes)
+        stroke = snap["colors"].get("stroke")
+        if stroke:
+            annot.set_colors(stroke=stroke)
+        annot.set_border(width=snap["border"].get("width", 1.5))
+        opacity = snap.get("opacity", 1.0)
+        if opacity is not None and opacity < 1.0:
+            annot.set_opacity(opacity)
+        annot.update()
     else:
         annot = page.add_rect_annot(rect)
         annot.update()
     return annot.xref
 
 
-def _move_annot(page: fitz.Page, xref: int, new_rect: fitz.Rect, new_verts: list) -> None:
+def _move_annot(page: fitz.Page, xref: int, new_rect: fitz.Rect, new_verts: list) -> int:
+    """Move annotation to new_rect/new_verts. Returns the (possibly new) xref.
+
+    Polygon, PolyLine, and Ink annotations are moved by delete+recreate rather
+    than by updating the xref directly.  fitz.Annot caches its geometry at
+    load time, so xref_set_key() + annot.update() would regenerate the
+    appearance stream from stale cached values — the annotation would snap
+    back to its original position visually.  Recreating avoids the cache.
+    """
     annot = page.load_annot(xref)
     if annot is None:
-        return
-    if new_verts:
-        annot.set_vertices(new_verts)
-    annot.set_rect(new_rect)
-    annot.update()
+        return xref
+    tname = annot.type[1] if annot.type else ""
+    if tname in ("Polygon", "PolyLine", "Ink"):
+        snap = _capture_annot(annot)
+        if new_verts:
+            snap["vertices"] = new_verts
+        snap["rect"] = list(new_rect)
+        page.delete_annot(annot)
+        return _recreate_annot(page, snap)
+    else:
+        annot.set_rect(new_rect)
+        annot.update()
+        return xref
 
 
 # ── concrete commands ─────────────────────────────────────────────────────────
@@ -91,6 +127,21 @@ class AddAnnotCmd(Command):
             self._xref = doc.apply_rect_annot(
                 self._page_num, self._data["rect"],
                 self._data["color"], self._data["width"]
+            )
+        elif self._annot_type == "polygon":
+            self._xref = doc.apply_polygon_annot(
+                self._page_num,
+                self._data["points"],
+                self._data["color"],
+                self._data["width"],
+            )
+        elif self._annot_type == "ink":
+            self._xref = doc.apply_ink_annot(
+                self._page_num,
+                self._data["strokes"],
+                self._data["color"],
+                self._data["width"],
+                self._data.get("opacity", 1.0),
             )
 
     def undo(self, doc: "PDFDocument") -> None:
@@ -131,11 +182,11 @@ class MoveAnnotCmd(Command):
 
     def execute(self, doc: "PDFDocument") -> None:
         page = doc.get_page(self._page_num)
-        _move_annot(page, self._xref, fitz.Rect(self._new_rect), self._new_verts)
+        self._xref = _move_annot(page, self._xref, fitz.Rect(self._new_rect), self._new_verts)
 
     def undo(self, doc: "PDFDocument") -> None:
         page = doc.get_page(self._page_num)
-        _move_annot(page, self._xref, fitz.Rect(self._old_rect), self._old_verts)
+        self._xref = _move_annot(page, self._xref, fitz.Rect(self._old_rect), self._old_verts)
 
 
 class AddTextCmd(Command):
@@ -227,6 +278,8 @@ class MoveImageWithSiblingsCmd(Command):
 
     def _apply(self, doc: "PDFDocument", wipe_rect: list, place_rect: list) -> None:
         page = doc.get_page(self._page_num)
+        # Insert at destination BEFORE redacting the source; if both rects overlap
+        # the redaction would also erase the freshly inserted image.
         page.insert_image(fitz.Rect(place_rect), stream=self._bytes, overlay=True)
         page.add_redact_annot(fitz.Rect(wipe_rect), fill=None)
         # text=1: keep text; graphics=0: keep drawings; images=1: remove image refs in area
@@ -267,22 +320,28 @@ class MoveDrawingCmd(Command):
 
 
 class EditTextCmd(Command):
-    """Undo: re-apply edit with original span data."""
+    """Edit an existing text span; undo re-applies with original text/font/color.
+
+    orig_font_bytes / new_font_bytes carry the raw embedded font data so the
+    typeface is re-embedded verbatim on each execute/undo cycle rather than
+    being re-resolved from name (which could produce a different font if the
+    original was a non-standard PostScript face).
+    """
 
     def __init__(self, page_num: int, span_bbox: list, span_origin: list,
                  orig_text: str, orig_size: float, orig_font: str,
-                 orig_color: tuple[float, float, float],
+                 orig_color: tuple[float, float, float], orig_font_bytes: bytes | None,
                  new_text: str, new_size: float, new_font: str,
-                 new_color: tuple[float, float, float]) -> None:
+                 new_color: tuple[float, float, float], new_font_bytes: bytes | None) -> None:
         self._page_num = page_num
         self._bbox = list(span_bbox)
         self._origin = list(span_origin)
-        self._orig = (orig_text, orig_size, orig_font, orig_color)
-        self._new = (new_text, new_size, new_font, new_color)
+        self._orig = (orig_text, orig_size, orig_font, orig_color, orig_font_bytes)
+        self._new  = (new_text,  new_size,  new_font,  new_color,  new_font_bytes)
 
     def execute(self, doc: "PDFDocument") -> None:
         new_bbox = doc.apply_text_edit(self._page_num, self._bbox, self._origin, *self._new)
-        self._bbox = new_bbox  # track actual extent so undo redacts the right area
+        self._bbox = new_bbox
 
     def undo(self, doc: "PDFDocument") -> None:
         new_bbox = doc.apply_text_edit(self._page_num, self._bbox, self._origin, *self._orig)
@@ -418,7 +477,7 @@ class History:
     def push(self, cmd: Command, doc: "PDFDocument") -> None:
         cmd.execute(doc)
         self._undo_stack.append(cmd)
-        self._redo_stack.clear()
+        self._redo_stack.clear()  # any new action invalidates the redo branch
 
     def undo(self, doc: "PDFDocument") -> int | None:
         """Execute undo; return page_num of affected page, or -1 for page operations, or None if nothing to undo."""

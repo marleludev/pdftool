@@ -85,14 +85,20 @@ class _Path:
 
 
 def strip_drawing(doc: fitz.Document, page: fitz.Page, drw: dict) -> bool:
-    """Remove stream operators for drawing whose bbox matches drw['rect'].
+    """Remove one vector path from the page content stream without touching anything else.
 
-    Detects both q...Q-wrapped paths and naked paths. If the target path's
-    enclosing q...Q contains only that one painting op, the whole group is
-    removed (to strip the graphics-state setup too). Otherwise only the
-    path operators are removed.
+    PyMuPDF has no direct API for deleting a single path; redaction would also
+    erase overlapping text/images.  Instead we tokenise the raw stream bytes,
+    track q/Q graphics-state groups, find the path whose bbox matches drw['rect'],
+    and splice out exactly the bytes that define it.
 
-    Returns True on success, False if no match (or stream can't be parsed).
+    If the target path is the only painted path inside its q…Q group, the
+    entire group (including cm, w, gs setup operators) is removed.  Otherwise
+    only the path construction + paint operators are removed, leaving the
+    surrounding graphics state intact for other paths in the same group.
+
+    Returns True on success, False if the path could not be found or the
+    stream contains inline images (BI…EI), which would break byte offsets.
     """
     try:
         page.clean_contents()

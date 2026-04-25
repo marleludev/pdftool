@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -63,15 +64,21 @@ def _find_unicode_font() -> str | None:
     return None
 
 
-BUILTIN_FONT_MAP = {
-    "helv": ["helvetica", "arial", "arialmt", "helveticaneue"],
-    "tiro": ["timesnewroman", "times", "timesroman"],
-    "cour": ["courier", "couriernew"],
-    "hebo": ["helvetica-bold", "arial-bold", "arialmt-bold"],
-    "tibo": ["times-bold", "timesnewroman-bold"],
-    "cobo": ["courier-bold", "couriernew-bold"],
-    "heob": ["helvetica-oblique", "helvetica-italic", "arial-italic"],
-    "tiit": ["times-italic", "timesnewroman-italic"],
+# Normalised family name substrings → fitz built-in family key.
+# "nimbus*" are the free PostScript substitutes bundled with Ghostscript/Linux:
+#   NimbusMonoPS ≈ Courier,  NimbusSans ≈ Helvetica,  NimbusR ≈ Times.
+_FAMILY_KEYS = {
+    "helv": ["helvetica", "arial", "nimbussans", "freesans"],
+    "tiro": ["times", "timesnewroman", "nimbusr", "freeserif"],
+    "cour": ["courier", "couriernew", "nimbusmonops", "nimbusmono", "freemono"],
+}
+
+# (is_bold, is_italic) → fitz built-in font name per family.
+# Courier has no oblique built-in so italic maps to regular "cour".
+_STYLE_MAP = {
+    "helv": {(False, False): "helv", (True, False): "hebo", (False, True): "heob", (True, True): "hebo"},
+    "tiro": {(False, False): "tiro", (True, False): "tibo", (False, True): "tiit", (True, True): "tiit"},
+    "cour": {(False, False): "cour", (True, False): "cobo", (False, True): "cour", (True, True): "cobo"},
 }
 
 
@@ -150,12 +157,28 @@ def _render_drawing(page: fitz.Page, drw: dict) -> None:
 
 
 def _builtin_for_name(name: str) -> str | None:
-    """Map a font name to a built-in PDF font identifier."""
-    clean = name.split("+")[-1].lower().replace(" ", "").replace("-", "")
-    for key, aliases in BUILTIN_FONT_MAP.items():
-        for alias in aliases:
-            if alias.replace("-", "") in clean or clean in alias.replace("-", ""):
-                return key
+    """Map any font name (including PostScript variants) to a fitz built-in identifier.
+
+    PDF span font names often use PostScript conventions that differ from the
+    PDF basefont name: "CourierNewPS-BoldMT", "NimbusMonoPS-Regular", "ArialMT".
+    Simple substring matching fails because "couriernew" appears inside
+    "couriernewpsboldmt" before "couriernewbold" — returning the wrong weight.
+
+    Fix: strip the PostScript markers (PS, MT, OT) first, then detect bold/
+    italic from keywords, then match family — so style is determined before
+    the family lookup, not after.
+    """
+    base = name.split("+")[-1]
+    norm = re.sub(r"(?i)(PS|MT|OT)", "", base)
+    norm = re.sub(r"[-_ ]", "", norm).lower()
+    is_bold   = "bold" in norm
+    is_italic = "italic" in norm or "oblique" in norm
+    # remove style words so only the family name remains for matching
+    family = re.sub(r"(bold|italic|oblique|regular|roman|medium|narrow|cond|light|thin|semi|demi|extra|black)", "", norm)
+    for base_key, variants in _FAMILY_KEYS.items():
+        for v in variants:
+            if v in family or family in v:
+                return _STYLE_MAP[base_key][(is_bold, is_italic)]
     return None
 
 
@@ -221,6 +244,32 @@ class PDFDocument:
             annot.set_colors(stroke=color)
             annot.update()
         logger.debug("Added highlight annotation on page %d (xref=%d)", page_num, annot.xref)
+        return annot.xref
+
+    def apply_polygon_annot(
+        self, page_num: int, points: list, color: list, width: float, opacity: float = 0.3
+    ) -> int:
+        page = self._doc[page_num]
+        fitz_pts = [fitz.Point(pt[0], pt[1]) for pt in points]
+        annot = page.add_polygon_annot(fitz_pts)
+        annot.set_colors(stroke=color, fill=color)
+        annot.set_border(width=width)
+        annot.set_opacity(opacity)
+        annot.update()
+        logger.debug("Added polygon annotation on page %d (xref=%d)", page_num, annot.xref)
+        return annot.xref
+
+    def apply_ink_annot(
+        self, page_num: int, strokes: list, color: list, width: float, opacity: float
+    ) -> int:
+        page = self._doc[page_num]
+        raw_strokes = [[(pt[0], pt[1]) for pt in stroke] for stroke in strokes]
+        annot = page.add_ink_annot(raw_strokes)
+        annot.set_colors(stroke=color)
+        annot.set_border(width=width)
+        annot.set_opacity(opacity)
+        annot.update()
+        logger.debug("Added ink annotation on page %d (xref=%d)", page_num, annot.xref)
         return annot.xref
 
     def apply_rect_annot(
@@ -373,6 +422,29 @@ class PDFDocument:
         tw.write_text(page, color=color)
         return [text_rect.x0, text_rect.y0, text_rect.x1, text_rect.y1]
 
+    def get_span_font_bytes(self, page_num: int, font_name: str) -> bytes | None:
+        """Return embedded font bytes for font_name, or None if not embedded."""
+        page = self._doc[page_num]
+        clean = font_name.split("+")[-1].lower().replace(" ", "")
+
+        for font_info in page.get_fonts():
+            # page.get_fonts() tuple layout: (xref, ext, type, basefont, name, enc, referencer)
+            xref = font_info[0]
+            basefont = font_info[3]  # PDF /BaseFont — e.g. "Courier-Bold"
+            fname = font_info[4]     # font name field — e.g. "CourierNewPS-BoldMT"
+            candidate = (basefont or fname or "").split("+")[-1].lower().replace(" ", "")
+            if not candidate or candidate != clean:
+                continue
+            try:
+                _, _, _, font_data, _ = self._doc.extract_font(xref)
+                if font_data:
+                    logger.debug("Font '%s' loaded from PDF embedding", font_name)
+                    return font_data
+            except Exception:
+                pass
+
+        return None
+
     def apply_text_edit(
         self,
         page_num: int,
@@ -382,6 +454,7 @@ class PDFDocument:
         fontsize: float,
         font_name: str,
         color: tuple[float, float, float],
+        font_bytes: bytes | None = None,
     ) -> list:
         """Edit existing text by replacing it with new text.
 
@@ -397,7 +470,19 @@ class PDFDocument:
         Returns:
             The actual bounding box [x0, y0, x1, y1] of the inserted text for undo tracking.
         """
-        font = self._resolve_font(page_num, font_name, new_text)
+        # Resolve font BEFORE redacting: the span's font is still in the page
+        # resource dict here.  After apply_redactions() the resource might be
+        # unreferenced and harder to find by name.
+        if font_bytes:
+            try:
+                font = fitz.Font(fontbuffer=font_bytes)
+            except Exception:
+                # fontbuffer fails for Type1 or malformed streams — fall back
+                # to name-based resolution which hits the embedded-font lookup
+                # while the page resource dict is still intact.
+                font = self._resolve_font(page_num, font_name, new_text)
+        else:
+            font = self._resolve_font(page_num, font_name, new_text)
         page = self._doc[page_num]
         page.add_redact_annot(fitz.Rect(span_bbox))
         page.apply_redactions(images=0, graphics=0, text=0)
@@ -477,22 +562,27 @@ class PDFDocument:
             if uf:
                 return fitz.Font(fontfile=uf)
 
-        if font_name in BUILTIN_FONT_MAP:
+        _fitz_builtins = {"helv", "hebo", "heob", "tiro", "tibo", "tiit", "cour", "cobo"}
+        if font_name in _fitz_builtins:
             return fitz.Font(fontname=font_name)
 
         builtin = _builtin_for_name(font_name)
         if builtin:
             return fitz.Font(fontname=builtin)
 
-        # Try embedded font — only TTF/OTF work with fitz.Font(fontbuffer=)
+        # Try embedded font
         page = self._doc[page_num]
-        clean_name = font_name.split("+")[-1].lower()
-        for xref, *_, name, _ in page.get_fonts():
-            if not (name and name.lower().replace(" ", "") == clean_name.replace(" ", "")):
+        clean_name = font_name.split("+")[-1].lower().replace(" ", "")
+        for font_info in page.get_fonts():
+            xref     = font_info[0]
+            basefont = font_info[3]  # /BaseFont
+            fname    = font_info[4]  # font name
+            candidate = (basefont or fname or "").split("+")[-1].lower().replace(" ", "")
+            if not candidate or candidate != clean_name:
                 continue
             try:
                 _, ext, _, font_data, _ = self._doc.extract_font(xref)
-                if font_data and ext in ("ttf", "otf"):
+                if font_data:
                     return fitz.Font(fontbuffer=font_data)
             except Exception as e:
                 logger.debug("Failed to extract embedded font: %s", e)

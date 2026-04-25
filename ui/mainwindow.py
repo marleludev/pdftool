@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 from core.document import PDFDocument
 from core.history import InsertPageCmd, MovePageCmd, DeletePageCmd, RotatePageCmd, ResizePageCmd
 from tools.annotate import HighlightTool, RectAnnotateTool
+from tools.brush import BrushTool, EncircleTool, BRUSH_STYLES
 from tools.image_insert import ImageInsertTool
 from tools.rect_select import RectangleSelectTool
 from tools.select import SelectTool
@@ -68,6 +69,8 @@ _QTA: dict[str, str] = {
     # Draw / annotate
     "draw-rectangle":          "fa6.square",
     "draw-highlight":          "fa6s.paintbrush",
+    "draw-brush":              "fa6s.pen-nib",
+    "draw-encircle":           "fa6s.draw-polygon",
     "draw-freehand":           "fa6s.pencil",
     # Tools / nav
     "transform-move":          "fa6s.up-down-left-right",
@@ -201,6 +204,11 @@ class MainWindow(QMainWindow):
         self._tab_idx: int = 0
         self._settings = QSettings("PDFTool", "PDFTool")
         self._highlight_color: tuple[float, float, float] = (1.0, 1.0, 0.0)  # yellow default
+        self._brush_color: tuple[float, float, float] = (0.0, 0.0, 0.8)    # blue default
+        self._brush_style: str = "pen"
+        self._brush_smoothness: str = "normal"
+        self._brush_close_path: bool = False
+        self._encircle_color: tuple[float, float, float] = (0.8, 0.0, 0.0)  # red default
 
         self._build_ui()
         self._create_actions()
@@ -490,6 +498,77 @@ class MainWindow(QMainWindow):
         _hl_btn.setMenu(_hl_menu)
         tb.addWidget(_hl_btn)
 
+        # Brush tool button with color + style drop-down
+        self._act_brush = QAction(_icon("draw-brush"), "Brush", self, checkable=True)
+        self._act_brush.setToolTip("Freehand brush drawing")
+        self._act_brush.triggered.connect(self._on_tool_selected)
+        _br_btn = QToolButton(self)
+        _br_btn.setDefaultAction(self._act_brush)
+        _br_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        _br_menu = QMenu(_br_btn)
+        for _label, _rgb in (
+            ("Black",  (0.0, 0.0, 0.0)),
+            ("Blue",   (0.0, 0.0, 0.8)),
+            ("Red",    (0.8, 0.0, 0.0)),
+            ("Green",  (0.0, 0.55, 0.0)),
+            ("Purple", (0.5, 0.0, 0.8)),
+        ):
+            _ca = QAction(self._color_swatch(_rgb), _label, self)
+            _ca.setData(("color", _rgb))
+            _ca.triggered.connect(self._on_brush_option_selected)
+            _br_menu.addAction(_ca)
+        _br_menu.addSeparator()
+        self._brush_style_actions: list[QAction] = []
+        for _slabel, _skey in (("Pen (thin)", "pen"), ("Brush (medium)", "brush"), ("Marker (wide)", "marker")):
+            _sa = QAction(_slabel, self)
+            _sa.setData(("style", _skey))
+            _sa.setCheckable(True)
+            _sa.setChecked(_skey == self._brush_style)
+            _sa.triggered.connect(self._on_brush_option_selected)
+            _br_menu.addAction(_sa)
+            self._brush_style_actions.append(_sa)
+        _br_menu.addSeparator()
+        self._brush_smoothness_actions: list[QAction] = []
+        for _smlab, _smkey in (("Normal", "normal"), ("Smooth", "smooth"), ("Very smooth", "max")):
+            _sma = QAction(_smlab, self)
+            _sma.setData(("smoothness", _smkey))
+            _sma.setCheckable(True)
+            _sma.setChecked(_smkey == self._brush_smoothness)
+            _sma.triggered.connect(self._on_brush_option_selected)
+            _br_menu.addAction(_sma)
+            self._brush_smoothness_actions.append(_sma)
+        _br_menu.addSeparator()
+        self._act_brush_close = QAction("Close path", self)
+        self._act_brush_close.setData(("close_path", None))
+        self._act_brush_close.setCheckable(True)
+        self._act_brush_close.setChecked(self._brush_close_path)
+        self._act_brush_close.triggered.connect(self._on_brush_option_selected)
+        _br_menu.addAction(self._act_brush_close)
+        _br_btn.setMenu(_br_menu)
+        tb.addWidget(_br_btn)
+
+        # Encircle tool button with color picker
+        self._act_encircle = QAction(_icon("draw-encircle"), "Encircle", self, checkable=True)
+        self._act_encircle.setToolTip("Draw closed freehand shape to encircle content")
+        self._act_encircle.triggered.connect(self._on_tool_selected)
+        _ec_btn = QToolButton(self)
+        _ec_btn.setDefaultAction(self._act_encircle)
+        _ec_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        _ec_menu = QMenu(_ec_btn)
+        for _label, _rgb in (
+            ("Red",    (0.8, 0.0, 0.0)),
+            ("Blue",   (0.0, 0.0, 0.8)),
+            ("Black",  (0.0, 0.0, 0.0)),
+            ("Green",  (0.0, 0.55, 0.0)),
+            ("Purple", (0.5, 0.0, 0.8)),
+        ):
+            _eca = QAction(self._color_swatch(_rgb), _label, self)
+            _eca.setData(_rgb)
+            _eca.triggered.connect(self._on_encircle_color_selected)
+            _ec_menu.addAction(_eca)
+        _ec_btn.setMenu(_ec_menu)
+        tb.addWidget(_ec_btn)
+
         tb.addSeparator()
         tb.addAction(self._act_img_file)
         tb.addAction(self._act_send_back)
@@ -516,6 +595,8 @@ class MainWindow(QMainWindow):
             self._act_text_edit: "text_edit",
             self._act_rect: "rect",
             self._act_highlight: "highlight",
+            self._act_brush: "brush",
+            self._act_encircle: "encircle",
         }
 
     def _connect_signals(self) -> None:
@@ -976,7 +1057,7 @@ class MainWindow(QMainWindow):
                     self._act_send_back, self._act_bring_front,
                     self._act_signatures):
             act.setEnabled(can_modify)
-        for act in (self._act_rect, self._act_highlight):
+        for act in (self._act_rect, self._act_highlight, self._act_brush, self._act_encircle):
             act.setEnabled(can_annotate)
 
         self._act_properties.setEnabled(can_modify)
@@ -1059,6 +1140,13 @@ class MainWindow(QMainWindow):
             self._canvas.set_tool(RectAnnotateTool(self._canvas))
         elif tool_name == "highlight":
             self._canvas.set_tool(HighlightTool(self._canvas, self._highlight_color))
+        elif tool_name == "brush":
+            self._canvas.set_tool(BrushTool(
+                self._canvas, self._brush_color, self._brush_style,
+                self._brush_smoothness, self._brush_close_path,
+            ))
+        elif tool_name == "encircle":
+            self._canvas.set_tool(EncircleTool(self._canvas, self._encircle_color))
 
     @staticmethod
     def _color_swatch(rgb: tuple[float, float, float]) -> QIcon:
@@ -1066,6 +1154,35 @@ class MainWindow(QMainWindow):
         pm = QPixmap(16, 16)
         pm.fill(QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)))
         return QIcon(pm)
+
+    def _on_brush_option_selected(self) -> None:
+        act = self.sender()
+        kind, value = act.data()  # type: ignore[union-attr]
+        if kind == "color":
+            self._brush_color = value
+        elif kind == "style":
+            self._brush_style = value
+            for a in self._brush_style_actions:
+                a.setChecked(a.data()[1] == self._brush_style)
+        elif kind == "smoothness":
+            self._brush_smoothness = value
+            for a in self._brush_smoothness_actions:
+                a.setChecked(a.data()[1] == self._brush_smoothness)
+        else:  # close_path
+            self._brush_close_path = self._act_brush_close.isChecked()
+        for a in self._tool_actions:
+            a.setChecked(a is self._act_brush)
+        self._canvas.set_tool(BrushTool(
+            self._canvas, self._brush_color, self._brush_style,
+            self._brush_smoothness, self._brush_close_path,
+        ))
+
+    def _on_encircle_color_selected(self) -> None:
+        act = self.sender()
+        self._encircle_color = act.data()  # type: ignore[union-attr]
+        for a in self._tool_actions:
+            a.setChecked(a is self._act_encircle)
+        self._canvas.set_tool(EncircleTool(self._canvas, self._encircle_color))
 
     def _on_highlight_color_selected(self) -> None:
         act = self.sender()

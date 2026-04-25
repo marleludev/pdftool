@@ -12,6 +12,19 @@ if TYPE_CHECKING:
 
 
 class AbstractTool(ABC):
+    """Base class for all canvas editing tools.
+
+    PDFCanvas routes mouse and keyboard events to the active tool via
+    on_press / on_move / on_release / on_key.  cancel() is called whenever
+    the tool is deactivated (tool switch, Escape, zoom re-render) so it can
+    clean up any in-progress scene items.
+
+    Coordinates are provided in both PDF space (pdf_pos, in points) and
+    scene space (scene_pos, in pixels at current render scale).  Tools that
+    write to the PDF use pdf_pos; tools that add preview graphics to the
+    QGraphicsScene use scene_pos.
+    """
+
     def __init__(self, canvas: "PDFCanvas") -> None:
         self.canvas = canvas
 
