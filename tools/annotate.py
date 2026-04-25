@@ -70,8 +70,9 @@ class RectAnnotateTool(AbstractTool):
 
 
 class HighlightTool(AbstractTool):
-    def __init__(self, canvas: "PDFCanvas") -> None:
+    def __init__(self, canvas: "PDFCanvas", color: tuple[float, float, float] = (1.0, 1.0, 0.0)) -> None:
         super().__init__(canvas)
+        self._color = color
         self._start_pdf: fitz.Point | None = None
         self._start_scene: QPointF | None = None
         self._page_num: int | None = None
@@ -81,9 +82,10 @@ class HighlightTool(AbstractTool):
         self._page_num = page_num
         self._start_pdf = pdf_pos
         self._start_scene = scene_pos
-        pen = QPen(QColor(255, 220, 0, 180), 1, Qt.PenStyle.SolidLine)
+        r, g, b = (int(c * 255) for c in self._color)
+        pen = QPen(QColor(r, g, b, 200), 1, Qt.PenStyle.SolidLine)
         self._rubber = self.canvas.scene().addRect(QRectF(scene_pos, scene_pos), pen)
-        self._rubber.setBrush(QColor(255, 255, 0, 80))
+        self._rubber.setBrush(QColor(r, g, b, 80))
 
     def on_move(self, page_num: int, pdf_pos: fitz.Point, scene_pos: QPointF, event: QMouseEvent) -> None:
         if self._rubber and self._start_scene:
@@ -106,7 +108,8 @@ class HighlightTool(AbstractTool):
             return
 
         if self.canvas.document:
-            cmd = AddAnnotCmd(self._page_num, "highlight", {"quads": [list(r.quad)]})
+            cmd = AddAnnotCmd(self._page_num, "highlight",
+                              {"quads": [list(r.quad)], "color": list(self._color)})
             self.canvas.push_command(cmd, self.canvas.document)
             self.canvas.refresh_page(self._page_num)
 

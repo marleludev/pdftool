@@ -83,7 +83,10 @@ class AddAnnotCmd(Command):
 
     def execute(self, doc: "PDFDocument") -> None:
         if self._annot_type == "highlight":
-            self._xref = doc.apply_highlight(self._page_num, self._data["quads"])
+            self._xref = doc.apply_highlight(
+                self._page_num, self._data["quads"],
+                color=self._data.get("color"),
+            )
         elif self._annot_type == "rect_annot":
             self._xref = doc.apply_rect_annot(
                 self._page_num, self._data["rect"],
@@ -346,6 +349,47 @@ class MovePageCmd(Command):
     def undo(self, doc: "PDFDocument") -> None:
         # Reverse the move
         doc.move_page(self._to_index, self._from_index)
+
+
+class ResizePageCmd(Command):
+    """Resize a page; undo restores the original page content and dimensions."""
+
+    def __init__(self, index: int, new_w: float, new_h: float, content_mode: str) -> None:
+        self._index = index
+        self._new_w = new_w
+        self._new_h = new_h
+        self._content_mode = content_mode
+        self._page_bytes: bytes | None = None
+
+    def execute(self, doc: "PDFDocument") -> None:
+        # Snapshot page before resize for undo
+        snap = fitz.open()
+        snap.insert_pdf(doc.fitz_doc, from_page=self._index, to_page=self._index)
+        self._page_bytes = snap.tobytes()
+        snap.close()
+        doc.resize_page(self._index, self._new_w, self._new_h, self._content_mode)
+
+    def undo(self, doc: "PDFDocument") -> None:
+        if self._page_bytes is None:
+            return
+        snap = fitz.open(stream=self._page_bytes, filetype="pdf")
+        doc.fitz_doc.delete_page(self._index)
+        doc.fitz_doc.insert_pdf(snap, start_at=self._index)
+        snap.close()
+
+
+class RotatePageCmd(Command):
+    """Rotate a page by delta degrees; undo reverses the rotation."""
+
+    def __init__(self, index: int, degrees: int) -> None:
+        self._index = index
+        self._degrees = degrees
+
+    def execute(self, doc: "PDFDocument") -> None:
+        doc.rotate_page(self._index, self._degrees)
+
+    def undo(self, doc: "PDFDocument") -> None:
+        doc.rotate_page(self._index, -self._degrees)
 
 
 class GroupCmd(Command):

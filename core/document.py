@@ -213,19 +213,13 @@ class PDFDocument:
 
     # ── annotations (immediately applied, xref returned for undo) ────────────
 
-    def apply_highlight(self, page_num: int, quads: list) -> int:
-        """Add a highlight annotation to a page.
-
-        Args:
-            page_num: Zero-based page index.
-            quads: List of quadrilaterals defining the highlight areas.
-
-        Returns:
-            The xref (cross-reference number) of the created annotation.
-        """
+    def apply_highlight(self, page_num: int, quads: list, color: list | None = None) -> int:
         page = self._doc[page_num]
         fitz_quads = [fitz.Quad(q) for q in quads]
         annot = page.add_highlight_annot(fitz_quads)
+        if color:
+            annot.set_colors(stroke=color)
+            annot.update()
         logger.debug("Added highlight annotation on page %d (xref=%d)", page_num, annot.xref)
         return annot.xref
 
@@ -584,6 +578,38 @@ class PDFDocument:
         """
         page = self._doc[page_num]
         return (page.rect.width, page.rect.height)
+
+    def resize_page(self, page_num: int, new_w: float, new_h: float, content_mode: str) -> None:
+        """Resize page to new_w × new_h points.
+
+        content_mode:
+          "scale" — scale content to fill new dimensions (flattens to XObject)
+          "keep"  — keep content at original coords; page box changes only
+          "crop"  — same as keep (new mediabox clips anything outside)
+        """
+        page = self._doc[page_num]
+        new_rect = fitz.Rect(0, 0, new_w, new_h)
+
+        if content_mode == "scale":
+            snap = fitz.open()
+            snap.insert_pdf(self._doc, from_page=page_num, to_page=page_num)
+            # Clear annotations so they are not doubled after show_pdf_page
+            for annot in list(page.annots()):
+                page.delete_annot(annot)
+            # Clear content streams
+            page.clean_contents()
+            for xref in page.get_contents():
+                self._doc.update_stream(xref, b"")
+            page.set_mediabox(new_rect)
+            page.show_pdf_page(new_rect, snap, 0)
+            snap.close()
+        else:
+            page.set_mediabox(new_rect)
+
+    def rotate_page(self, page_num: int, delta: int) -> None:
+        """Rotate page by delta degrees (cumulative, multiple of 90)."""
+        page = self._doc[page_num]
+        page.set_rotation((page.rotation + delta) % 360)
 
     # ── persist ───────────────────────────────────────────────────────────────
 

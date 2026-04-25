@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
@@ -20,11 +21,13 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QToolBar,
+    QToolButton,
 )
 
 from core.document import PDFDocument
-from core.history import InsertPageCmd, MovePageCmd, DeletePageCmd
+from core.history import InsertPageCmd, MovePageCmd, DeletePageCmd, RotatePageCmd, ResizePageCmd
 from tools.annotate import HighlightTool, RectAnnotateTool
 from tools.image_insert import ImageInsertTool
 from tools.rect_select import RectangleSelectTool
@@ -45,43 +48,43 @@ logger = logging.getLogger(__name__)
 # FA5 Solid not used: Qt6 dedupes "Font Awesome 5 Free" family across weights,
 # breaking solid-only glyphs.
 _QTA: dict[str, str] = {
-    # File ops
-    "document-open":           "fa6s.folder-open",
-    "document-save":           "fa6s.floppy-disk",          # FA4: save / floppy-o
-    "document-save-as":        "fa6s.share-from-square",    # FA4: share-square-o
-    "document-close":          "fa6s.circle-xmark",         # FA4: times-circle
-    "document-open-recent":    "fa6s.clock-rotate-left",    # FA4: history
-    "document-properties":     "fa6s.gear",                 # FA4: cog
+    # File ops  (fa6 = regular/outline, fa6s = solid-only)
+    "document-open":           "fa6.folder-open",
+    "document-save":           "fa6.floppy-disk",
+    "document-save-as":        "fa6.share-from-square",
+    "document-close":          "fa6.circle-xmark",
+    "document-open-recent":    "fa6s.clock-rotate-left",
+    "document-properties":     "fa6s.gear",
     # Edit ops
-    "edit-undo":               "fa6s.rotate-left",          # FA4: undo
-    "edit-redo":               "fa6s.rotate-right",         # FA4: repeat / redo
-    "edit-paste":              "fa6s.clipboard",
-    "edit-select":             "fa6s.arrow-pointer",        # FA4: mouse-pointer
-    "edit-rect-select":        "fa6s.object-group",
-    "insert-page":             "fa6s.file",                 # FA4: file-o
+    "edit-undo":               "fa6s.rotate-left",
+    "edit-redo":               "fa6s.rotate-right",
+    "edit-paste":              "fa6.clipboard",
+    "edit-select":             "fa6s.arrow-pointer",
+    "edit-rect-select":        "fa6.object-group",
+    "insert-page":             "fa6.file",
     "insert-text":             "fa6s.font",
-    "insert-image":            "fa6s.image",                # FA4: picture-o
-    "document-edit":           "fa6s.pen-to-square",        # FA4: pencil-square-o
+    "insert-image":            "fa6.image",
+    "document-edit":           "fa6.pen-to-square",
     # Draw / annotate
-    "draw-rectangle":          "fa6s.square",               # FA4: square-o
-    "draw-highlight":          "fa6s.paintbrush",           # FA4: paint-brush
+    "draw-rectangle":          "fa6.square",
+    "draw-highlight":          "fa6s.paintbrush",
     "draw-freehand":           "fa6s.pencil",
     # Tools / nav
-    "transform-move":          "fa6s.up-down-left-right",   # FA4: arrows
-    "input-mouse":             "fa6s.hand",                 # FA4: hand-paper-o
+    "transform-move":          "fa6s.up-down-left-right",
+    "input-mouse":             "fa6.hand",
     # Z-order
-    "object-order-back":       "fa6s.turn-down",            # FA4: level-down
-    "object-order-front":      "fa6s.turn-up",              # FA4: level-up
+    "object-order-back":       "fa6s.turn-down",
+    "object-order-front":      "fa6s.turn-up",
     # Zoom
-    "zoom-in":                 "fa6s.magnifying-glass-plus",   # FA4: search-plus
-    "zoom-out":                "fa6s.magnifying-glass-minus",  # FA4: search-minus
-    "zoom-fit-best":           "fa6s.expand",               # FA4: arrows-alt
+    "zoom-in":                 "fa6s.magnifying-glass-plus",
+    "zoom-out":                "fa6s.magnifying-glass-minus",
+    "zoom-fit-best":           "fa6s.expand",
     # Image / scan
     "scanner":                 "fa6s.camera",
-    "image-x-generic":         "fa6s.image",
-    "image-x-raw":             "fa6s.image",
+    "image-x-generic":         "fa6.image",
+    "image-x-raw":             "fa6.image",
     # Misc
-    "user-trash":              "fa6s.trash-can",            # FA4: trash-o
+    "user-trash":              "fa6.trash-can",
     "application-certificate": "fa6s.certificate",
     "mail-signed":             "fa6s.signature",
     "document-encrypt":        "fa6s.lock",
@@ -95,7 +98,7 @@ def _qta_icon(name: str) -> QIcon:
         return QIcon()
     try:
         import qtawesome as qta
-        return qta.icon(qta_name, color="#444444")
+        return qta.icon(qta_name, color="#555555")
     except Exception:
         return QIcon()
 
@@ -127,15 +130,63 @@ def _icon_any(*names: str) -> QIcon:
             return ic
     return QIcon()
 
+
 MAX_RECENT = 10
 
 _SIG_DIR        = Path.home() / ".config" / "PDFTool" / "signatures"
 _SIG_MAX_W      = 5 * 72 / 2.54   # 5 cm in PDF points ≈ 141.7
 _SCAN_DPI_KEY   = "scanDpi"
 _SCAN_DPI_DEFAULT = 150
+_COMPRESS_DPI_KEY     = "compressImagesDpi"
+_COMPRESS_DPI_DEFAULT = 200
+
+
+@dataclass
+class _TabState:
+    canvas: PDFCanvas
+    thumb_panel: ThumbnailPanel
+    splitter: QSplitter
+    doc: PDFDocument | None = None
+    modified: bool = False
 
 
 class MainWindow(QMainWindow):
+
+    # ── tab state properties ──────────────────────────────────────────────────
+
+    @property
+    def _canvas(self) -> PDFCanvas:
+        return self._tabs[self._tab_idx].canvas
+
+    @property
+    def _thumb_panel(self) -> ThumbnailPanel:
+        return self._tabs[self._tab_idx].thumb_panel
+
+    @property
+    def _doc(self) -> PDFDocument | None:
+        if not self._tabs or self._tab_idx >= len(self._tabs):
+            return None
+        return self._tabs[self._tab_idx].doc
+
+    @_doc.setter
+    def _doc(self, value: PDFDocument | None) -> None:
+        self._tabs[self._tab_idx].doc = value
+        self._update_tab_title()
+
+    @property
+    def _modified(self) -> bool:
+        if not self._tabs or self._tab_idx >= len(self._tabs):
+            return False
+        return self._tabs[self._tab_idx].modified
+
+    @_modified.setter
+    def _modified(self, value: bool) -> None:
+        if self._tabs and self._tab_idx < len(self._tabs):
+            self._tabs[self._tab_idx].modified = value
+            self._update_tab_title()
+
+    # ── init ──────────────────────────────────────────────────────────────────
+
     def __init__(self) -> None:
         super().__init__()
         _icon_path = Path(__file__).parent.parent / "pdftool.png"
@@ -146,9 +197,10 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"PDF Tool {_ver}")
         self.resize(1280, 900)
 
-        self._doc: PDFDocument | None = None
-        self._modified: bool = False
+        self._tabs: list[_TabState] = []
+        self._tab_idx: int = 0
         self._settings = QSettings("PDFTool", "PDFTool")
+        self._highlight_color: tuple[float, float, float] = (1.0, 1.0, 0.0)  # yellow default
 
         self._build_ui()
         self._create_actions()
@@ -166,16 +218,13 @@ class MainWindow(QMainWindow):
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self._canvas = PDFCanvas()
-        self._thumb_panel = ThumbnailPanel()
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setTabsClosable(True)
+        self._tab_widget.setMovable(True)
+        self._tab_widget.setDocumentMode(True)
+        self.setCentralWidget(self._tab_widget)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._thumb_panel)
-        splitter.addWidget(self._canvas)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([200, 1080])
-        self.setCentralWidget(splitter)
+        self._make_tab()  # initial empty tab
 
         self._status_page = QLabel("No document")
         self._status_zoom = QLabel("")
@@ -183,6 +232,111 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._status_page)
         sb.addPermanentWidget(self._status_zoom)
         self.setStatusBar(sb)
+
+    def _make_tab(self) -> int:
+        """Create a new tab with its own canvas and thumbnail panel. Returns new tab index."""
+        canvas = PDFCanvas()
+        thumb = ThumbnailPanel()
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(thumb)
+        splitter.addWidget(canvas)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([200, 1080])
+
+        tab = _TabState(canvas=canvas, thumb_panel=thumb, splitter=splitter)
+        self._tabs.append(tab)
+        idx = len(self._tabs) - 1
+        self._tab_widget.addTab(splitter, "No document")
+
+        # Per-tab signal connections
+        canvas.document_modified.connect(lambda: self._on_canvas_modified(canvas))
+        canvas.page_changed.connect(lambda p: self._on_canvas_page_changed(canvas, p))
+        thumb.page_selected.connect(canvas.scroll_to_page)
+        thumb.page_move_requested.connect(self._on_page_move)
+        thumb.page_delete_requested.connect(self._on_page_delete)
+        thumb.page_insert_requested.connect(self._on_page_insert)
+        thumb.page_rotate_requested.connect(self._on_page_rotate)
+        thumb.page_resize_requested.connect(self._on_page_resize_from_thumb)
+
+        return idx
+
+    def _tab_for_canvas(self, canvas: PDFCanvas) -> tuple[int, _TabState] | None:
+        for i, tab in enumerate(self._tabs):
+            if tab.canvas is canvas:
+                return i, tab
+        return None
+
+    def _update_tab_title(self, idx: int | None = None) -> None:
+        if not hasattr(self, "_tab_widget") or not self._tabs:
+            return
+        if idx is None:
+            idx = self._tab_idx
+        if idx >= len(self._tabs):
+            return
+        tab = self._tabs[idx]
+        name = tab.doc.path.name if tab.doc else "No document"
+        suffix = " *" if tab.modified else ""
+        self._tab_widget.setTabText(idx, name + suffix)
+        if idx == self._tab_idx:
+            base = f"PDF Tool — {name}" if tab.doc else "PDF Tool"
+            self.setWindowTitle(base + suffix)
+
+    # ── tab event handlers ────────────────────────────────────────────────────
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index < 0 or index >= len(self._tabs):
+            return
+        self._tab_idx = index
+        tab = self._tabs[index]
+        self._update_tab_title(index)
+        if tab.doc:
+            self._apply_doc_permissions()
+            self._status_page.setText(f"Page 1 / {tab.doc.page_count}")
+        else:
+            self._status_page.setText("No document")
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        if len(self._tabs) == 1:
+            # Last tab: clear content but keep the tab
+            self._close_document()
+            return
+
+        tab = self._tabs[index]
+        if tab.modified:
+            # Temporarily point properties at the tab being closed
+            prev_idx = self._tab_idx
+            self._tab_idx = index
+            ok = self._confirm_discard()
+            self._tab_idx = prev_idx
+            if not ok:
+                return
+
+        if tab.doc:
+            tab.doc.close()
+        self._tabs.pop(index)
+        self._tab_widget.removeTab(index)
+        # currentChanged fires automatically when needed; _on_tab_changed updates _tab_idx
+
+    def _on_canvas_modified(self, canvas: PDFCanvas) -> None:
+        result = self._tab_for_canvas(canvas)
+        if result is None:
+            return
+        idx, tab = result
+        tab.modified = True
+        self._update_tab_title(idx)
+
+    def _on_canvas_page_changed(self, canvas: PDFCanvas, page_num: int) -> None:
+        result = self._tab_for_canvas(canvas)
+        if result is None:
+            return
+        idx, tab = result
+        if idx != self._tab_idx:
+            return
+        if tab.doc:
+            self._status_page.setText(f"Page {page_num + 1} / {tab.doc.page_count}")
+            tab.thumb_panel.highlight_page(page_num)
 
     def _build_menus(self) -> None:
         from PyQt6.QtWidgets import QStyle
@@ -193,7 +347,7 @@ class MainWindow(QMainWindow):
         self._act_open = QAction(_icon("document-open", SP.SP_DialogOpenButton), "&Open…", self, shortcut=QKeySequence.StandardKey.Open)
         self._act_save = QAction(_icon("document-save", SP.SP_DialogSaveButton), "&Save", self, shortcut=QKeySequence.StandardKey.Save)
         self._act_save_as = QAction(_icon("document-save-as"), "Save &As…", self, shortcut=QKeySequence("Ctrl+Shift+S"))
-        self._act_close = QAction(_icon("document-close", SP.SP_DialogCloseButton), "&Close", self, shortcut=QKeySequence.StandardKey.Close)
+        self._act_close = QAction(_icon("document-close", SP.SP_DialogCloseButton), "&Close Tab", self, shortcut=QKeySequence.StandardKey.Close)
 
         file_menu.addAction(self._act_open)
         file_menu.addSeparator()
@@ -228,6 +382,11 @@ class MainWindow(QMainWindow):
             "Convert to &Scannered…", self,
         )
         self._act_scan.setToolTip("Rasterize all pages to images, strip fonts and vectors, minimize file size")
+        self._act_compress_images = QAction(
+            _icon_any("zoom-out", "image-x-generic"),
+            "&Reduce Image DPI…", self,
+        )
+        self._act_compress_images.setToolTip("Downsample embedded images exceeding a target DPI to reduce file size")
         self._act_prune = QAction(
             _icon_any("edit-clear", "user-trash", "document-revert"),
             "&Prune…", self,
@@ -248,7 +407,14 @@ class MainWindow(QMainWindow):
         doc_menu.addAction(self._act_encrypt)
         doc_menu.addAction(self._act_unlock)
         doc_menu.addSeparator()
+        self._act_resize_pages = QAction(
+            _icon_any("resize", "zoom-fit-best"),
+            "Resize &Page(s)…", self,
+        )
+        self._act_resize_pages.setToolTip("Change page dimensions for current or all pages")
         doc_menu.addAction(self._act_scan)
+        doc_menu.addAction(self._act_compress_images)
+        doc_menu.addAction(self._act_resize_pages)
         doc_menu.addAction(self._act_prune)
 
         view_menu = mb.addMenu("&View")
@@ -301,9 +467,28 @@ class MainWindow(QMainWindow):
             shortcut=QKeySequence("Ctrl+Shift+G"))
         self._act_signatures.setToolTip("Manage and place signatures (Ctrl+Shift+G)")
 
-        for act in (self._act_pan, self._act_select, self._act_rect_select, self._act_text, self._act_text_edit, self._act_rect, self._act_highlight):
+        for act in (self._act_pan, self._act_select, self._act_rect_select, self._act_text, self._act_text_edit, self._act_rect):
             tb.addAction(act)
             act.triggered.connect(self._on_tool_selected)
+
+        # Highlight tool button with color picker drop-down
+        self._act_highlight.triggered.connect(self._on_tool_selected)
+        _hl_btn = QToolButton(self)
+        _hl_btn.setDefaultAction(self._act_highlight)
+        _hl_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        _hl_menu = QMenu(_hl_btn)
+        for _label, _rgb in (
+            ("Yellow",     (1.0, 1.0, 0.0)),
+            ("Orange",     (1.0, 0.6, 0.0)),
+            ("Green",      (0.2, 0.9, 0.2)),
+            ("Light Blue", (0.0, 0.8, 1.0)),
+        ):
+            _act = QAction(self._color_swatch(_rgb), _label, self)
+            _act.setData(_rgb)
+            _act.triggered.connect(self._on_highlight_color_selected)
+            _hl_menu.addAction(_act)
+        _hl_btn.setMenu(_hl_menu)
+        tb.addWidget(_hl_btn)
 
         tb.addSeparator()
         tb.addAction(self._act_img_file)
@@ -337,16 +522,14 @@ class MainWindow(QMainWindow):
         self._act_open.triggered.connect(self._open_file)
         self._act_save.triggered.connect(self._save_file)
         self._act_save_as.triggered.connect(self._save_file_as)
-        self._act_close.triggered.connect(self._close_document)
+        self._act_close.triggered.connect(lambda: self._on_tab_close_requested(self._tab_idx))
         self._act_undo.triggered.connect(self._undo)
         self._act_redo.triggered.connect(self._redo)
         self._act_properties.triggered.connect(self._edit_properties)
-        self._canvas.document_modified.connect(self._mark_modified)
-        self._act_zoom_in.triggered.connect(self._canvas.zoom_in)
-        self._act_zoom_out.triggered.connect(self._canvas.zoom_out)
-        self._act_fit.triggered.connect(self._canvas.fit_width)
-        self._thumb_panel.page_selected.connect(self._canvas.scroll_to_page)
-        self._canvas.page_changed.connect(self._on_page_changed)
+        # Lambdas so property is evaluated at call time, not connection time
+        self._act_zoom_in.triggered.connect(lambda: self._canvas.zoom_in())
+        self._act_zoom_out.triggered.connect(lambda: self._canvas.zoom_out())
+        self._act_fit.triggered.connect(lambda: self._canvas.fit_width())
         self._act_img_file.triggered.connect(self._insert_image_file)
         self._act_img_paste.triggered.connect(self._insert_image_clipboard)
         self._act_send_back.triggered.connect(lambda: self._image_zorder(to_back=True))
@@ -355,12 +538,12 @@ class MainWindow(QMainWindow):
         self._act_encrypt.triggered.connect(self._encrypt_document)
         self._act_unlock.triggered.connect(self._unlock_document)
         self._act_scan.triggered.connect(self._convert_to_scanned)
+        self._act_compress_images.triggered.connect(self._compress_images)
+        self._act_resize_pages.triggered.connect(lambda: self._open_resize_dialog(None))
         self._act_prune.triggered.connect(self._prune_document)
         self._act_insert_page.triggered.connect(self._on_insert_page_toolbar)
-        # Page manipulation signals
-        self._thumb_panel.page_move_requested.connect(self._on_page_move)
-        self._thumb_panel.page_delete_requested.connect(self._on_page_delete)
-        self._thumb_panel.page_insert_requested.connect(self._on_page_insert)
+        self._tab_widget.currentChanged.connect(self._on_tab_changed)
+        self._tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
 
     # ── recent files ──────────────────────────────────────────────────────────
 
@@ -408,48 +591,49 @@ class MainWindow(QMainWindow):
         paths = self._recent_paths()
         if paths:
             start_dir = str(Path(paths[0]).parent)
-        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", start_dir, "PDF Files (*.pdf)")
-        if path:
-            self._load_path(Path(path))
+        files, _ = QFileDialog.getOpenFileNames(self, "Open PDF", start_dir, "PDF Files (*.pdf)")
+        for f in files:
+            self._load_path(Path(f))
 
     def _load_path(self, path: Path) -> None:
-        """Load a PDF document from the given path.
-
-        Args:
-            path: Path to the PDF file to open.
-        """
         if not path.exists():
             QMessageBox.warning(self, "File not found", f"File not found:\n{path}")
             return
         if path.suffix.lower() != ".pdf":
             QMessageBox.warning(self, "Invalid file", f"Not a PDF file:\n{path}")
             return
-        if not self._confirm_discard():
-            return
-        if self._doc:
-            self._doc.close()
+
         try:
-            self._doc = PDFDocument(path)
+            doc = PDFDocument(path)
         except Exception as exc:
             QMessageBox.critical(self, "Open error", f"Failed to open PDF:\n{exc}")
             logger.exception("Failed to open PDF: %s", path)
             return
 
-        if self._doc._doc.needs_pass:
+        if doc._doc.needs_pass:
             pw, ok = QInputDialog.getText(
                 self, "Password required", "Enter document password:",
                 QLineEdit.EchoMode.Password,
             )
-            if not ok or not self._doc._doc.authenticate(pw):
+            if not ok or not doc._doc.authenticate(pw):
                 QMessageBox.critical(self, "Wrong password", "Incorrect password — document not opened.")
-                self._doc.close()
-                self._doc = None
+                doc.close()
                 return
 
-        self._modified = False
-        self._canvas.load_document(self._doc)
-        self._thumb_panel.load_document(self._doc)
-        self.setWindowTitle(f"PDF Tool — {path.name}")
+        # Use current tab if empty, otherwise open a new tab
+        if self._doc is not None:
+            new_idx = self._make_tab()
+            self._tab_widget.setCurrentIndex(new_idx)
+            # currentChanged fires synchronously → _on_tab_changed → self._tab_idx updated
+
+        if self._doc:
+            self._doc.close()
+
+        self._tabs[self._tab_idx].doc = doc
+        self._tabs[self._tab_idx].modified = False
+        self._canvas.load_document(doc)
+        self._thumb_panel.load_document(doc)
+        self._update_tab_title()
         self._apply_doc_permissions()
         self._add_to_recent(str(path))
 
@@ -462,7 +646,7 @@ class MainWindow(QMainWindow):
             self._doc.save(out)
             self._doc.path = out
             self._clear_modified()
-            self.setWindowTitle(f"PDF Tool — {out.name}")
+            self._update_tab_title()
             self._add_to_recent(str(out))
             QMessageBox.information(self, "Saved", f"Saved to:\n{out}")
         except Exception as exc:
@@ -485,12 +669,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save error", str(exc))
 
     def _close_document(self) -> None:
+        """Close document in current tab, reset tab to empty state."""
         if not self._confirm_discard():
             return
-        if self._doc:
-            self._doc.close()
-            self._doc = None
-        self._modified = False
+        tab = self._tabs[self._tab_idx]
+        if tab.doc:
+            tab.doc.close()
+            tab.doc = None
+        tab.modified = False
+        tab.canvas.document = None
+        tab.canvas._scene.clear()
+        tab.canvas._page_items.clear()
+        tab.canvas._page_rects.clear()
+        tab.thumb_panel._list.clear()
         for act in (self._act_select, self._act_rect_select,
                     self._act_text, self._act_text_edit,
                     self._act_img_file, self._act_img_paste,
@@ -499,27 +690,16 @@ class MainWindow(QMainWindow):
                     self._act_signatures, self._act_rect, self._act_highlight,
                     self._act_properties, self._act_undo, self._act_redo):
             act.setEnabled(True)
-        self._canvas.document = None
-        self._canvas._scene.clear()
-        self._canvas._page_items.clear()
-        self._canvas._page_rects.clear()
-        self._thumb_panel._list.clear()
-        self.setWindowTitle("PDF Tool")
+        self._update_tab_title()
         self._status_page.setText("No document")
 
     # ── image insert ──────────────────────────────────────────────────────────
 
     def _start_image_insert(self, img_bytes: bytes) -> None:
-        """Start the image insertion process with validation.
-
-        Args:
-            img_bytes: Raw bytes of the image to insert.
-        """
         if not self._doc:
             QMessageBox.warning(self, "No document", "Open a PDF first.")
             return
 
-        # Validate image data before processing
         try:
             with Image.open(io.BytesIO(img_bytes)) as img:
                 img.verify()
@@ -630,9 +810,9 @@ class MainWindow(QMainWindow):
                 new_page.insert_image(new_page.rect, pixmap=pix)
             new_doc.save(
                 out_path,
-                garbage=4,      # remove all unused objects/streams
-                deflate=True,   # compress streams
-                clean=True,     # sanitize content streams
+                garbage=4,
+                deflate=True,
+                clean=True,
             )
         finally:
             new_doc.close()
@@ -641,6 +821,100 @@ class MainWindow(QMainWindow):
             self, "Done",
             f"Scanned PDF saved:\n{out_path}"
         )
+
+    # ── compress images ───────────────────────────────────────────────────────
+
+    def _compress_images(self) -> None:
+        if not self._doc:
+            QMessageBox.warning(self, "No document", "Open a PDF first.")
+            return
+
+        from ui.compress_dialog import CompressImagesDialog
+        default_dpi = int(self._settings.value(_COMPRESS_DPI_KEY, _COMPRESS_DPI_DEFAULT))
+
+        path = self._doc.path
+        file_size = path.stat().st_size if path.exists() else len(self._doc._doc.tobytes())
+
+        dlg = CompressImagesDialog(self._doc._doc, file_size, default_dpi, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        dpi = dlg.target_dpi
+        self._settings.setValue(_COMPRESS_DPI_KEY, dpi)
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Compressed PDF", str(self._doc.path.parent), "PDF files (*.pdf)"
+        )
+        if not out_path:
+            return
+
+        src_bytes = self._doc._doc.tobytes()
+        work_doc = fitz.open(stream=src_bytes, filetype="pdf")
+        reduced = 0
+        skipped = 0
+
+        try:
+            processed_xrefs: set[int] = set()
+
+            for page in work_doc:
+                for info in page.get_image_info(xrefs=True):
+                    xref: int = info.get("xref", 0)
+                    if xref == 0 or xref in processed_xrefs:
+                        continue
+                    processed_xrefs.add(xref)
+
+                    # Display rect in PDF points (72 pt = 1 inch)
+                    bbox = info.get("bbox")
+                    if not bbox:
+                        continue
+                    rect = fitz.Rect(bbox)
+                    display_w_inch = rect.width / 72.0
+                    if display_w_inch <= 0:
+                        continue
+
+                    try:
+                        base_image = work_doc.extract_image(xref)
+                    except Exception:
+                        skipped += 1
+                        continue
+
+                    native_w: int = base_image["width"]
+                    native_h: int = base_image["height"]
+                    img_bytes: bytes = base_image["image"]
+
+                    native_dpi = native_w / display_w_inch
+                    if native_dpi <= dpi:
+                        continue  # already within target
+
+                    scale = dpi / native_dpi
+                    new_w = max(1, int(native_w * scale))
+                    new_h = max(1, int(native_h * scale))
+
+                    try:
+                        with Image.open(io.BytesIO(img_bytes)) as img:
+                            has_alpha = img.mode in ("RGBA", "LA", "PA")
+                            img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+                            buf = io.BytesIO()
+                            if has_alpha:
+                                img_resized.save(buf, format="PNG", optimize=True)
+                            else:
+                                if img_resized.mode not in ("RGB", "L"):
+                                    img_resized = img_resized.convert("RGB")
+                                img_resized.save(buf, format="JPEG", quality=85, optimize=True)
+                        page.replace_image(xref, stream=buf.getvalue())
+                        reduced += 1
+                    except Exception as exc:
+                        logger.warning("Could not replace image xref %d: %s", xref, exc)
+                        skipped += 1
+
+            work_doc.save(out_path, garbage=4, deflate=True, clean=True)
+        finally:
+            work_doc.close()
+
+        msg = f"Reduced {reduced} image(s) to ≤{dpi} DPI."
+        if skipped:
+            msg += f"\n{skipped} image(s) skipped (unsupported format)."
+        msg += f"\nSaved to:\n{out_path}"
+        QMessageBox.information(self, "Done", msg)
 
     # ── prune ─────────────────────────────────────────────────────────────────
 
@@ -688,16 +962,13 @@ class MainWindow(QMainWindow):
     # ── permissions ───────────────────────────────────────────────────────────
 
     def _apply_doc_permissions(self) -> None:
-        """Disable edit tools when the document has permission restrictions."""
         if not self._doc:
             return
         perms = self._doc._doc.permissions
-        # -4 = owner authenticated (all PDF permission bits set); any other value = restricted
         unlocked = perms == -4
         can_modify = unlocked or bool(perms & fitz.PDF_PERM_MODIFY)
         can_annotate = unlocked or bool(perms & (fitz.PDF_PERM_ANNOTATE | fitz.PDF_PERM_FORM))
 
-        # Tools that move/delete/add content
         for act in (self._act_select, self._act_rect_select,
                     self._act_text, self._act_text_edit,
                     self._act_img_file, self._act_img_paste,
@@ -708,13 +979,11 @@ class MainWindow(QMainWindow):
         for act in (self._act_rect, self._act_highlight):
             act.setEnabled(can_annotate)
 
-        # Metadata and history
         self._act_properties.setEnabled(can_modify)
         self._act_undo.setEnabled(can_modify or can_annotate)
         self._act_redo.setEnabled(can_modify or can_annotate)
 
         if not (can_modify or can_annotate):
-            # Force pan — no active editing tool allowed
             for act in self._tool_actions:
                 act.setChecked(act is self._act_pan)
             self._canvas.set_tool(None)
@@ -725,7 +994,6 @@ class MainWindow(QMainWindow):
         self._act_unlock.setEnabled(perms != -4)
 
     def _unlock_document(self) -> None:
-        """Prompt for owner password and re-enable tools if correct."""
         if not self._doc:
             return
         pw, ok = QInputDialog.getText(
@@ -790,7 +1058,21 @@ class MainWindow(QMainWindow):
         elif tool_name == "rect":
             self._canvas.set_tool(RectAnnotateTool(self._canvas))
         elif tool_name == "highlight":
-            self._canvas.set_tool(HighlightTool(self._canvas))
+            self._canvas.set_tool(HighlightTool(self._canvas, self._highlight_color))
+
+    @staticmethod
+    def _color_swatch(rgb: tuple[float, float, float]) -> QIcon:
+        from PyQt6.QtGui import QPixmap, QColor
+        pm = QPixmap(16, 16)
+        pm.fill(QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)))
+        return QIcon(pm)
+
+    def _on_highlight_color_selected(self) -> None:
+        act = self.sender()
+        self._highlight_color = act.data()  # type: ignore[union-attr]
+        for a in self._tool_actions:
+            a.setChecked(a is self._act_highlight)
+        self._canvas.set_tool(HighlightTool(self._canvas, self._highlight_color))
 
     def _commit_active_tool(self) -> None:
         tool = self._canvas._current_tool
@@ -801,12 +1083,10 @@ class MainWindow(QMainWindow):
 
     def _mark_modified(self) -> None:
         if not self._modified:
-            self._modified = True
-            self.setWindowTitle(self.windowTitle() + " *")
+            self._modified = True  # setter calls _update_tab_title
 
     def _clear_modified(self) -> None:
-        self._modified = False
-        self.setWindowTitle(self.windowTitle().removesuffix(" *"))
+        self._modified = False  # setter calls _update_tab_title
 
     def _confirm_discard(self) -> bool:
         """Return True if it's OK to discard unsaved changes."""
@@ -830,10 +1110,10 @@ class MainWindow(QMainWindow):
     def _edit_properties(self) -> None:
         if not self._doc:
             return
-        dlg = PropertiesDialog(self._doc._doc.metadata, parent=self)
+        pages = [self._doc.get_page_size(i) for i in range(self._doc.page_count)]
+        dlg = PropertiesDialog(self._doc._doc.metadata, pages=pages, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        # Merge to preserve fields not shown in the dialog (producer, creationDate, etc.)
         merged = dict(self._doc._doc.metadata)
         merged.update(dlg.result_meta)
         self._doc._doc.set_metadata(merged)
@@ -846,39 +1126,44 @@ class MainWindow(QMainWindow):
             result = self._canvas.history.undo(self._doc)
             if result is not None:
                 if result == -1:
-                    # Page operation - reload entire document
                     self._thumb_panel.refresh_thumbnails()
                     self._canvas.load_document(self._doc)
                 elif result >= 0:
-                    # Drop any stale selection overlays from multi_select before redraw
                     self._canvas.set_tool(None)
                     self._canvas.refresh_page(result)
                     self._canvas.viewport().update()
-                self._clear_modified()  # Undo reverts to previous state
+                self._clear_modified()
 
     def _redo(self) -> None:
         if self._doc:
             result = self._canvas.history.redo(self._doc)
             if result is not None:
                 if result == -1:
-                    # Page operation - reload entire document
                     self._thumb_panel.refresh_thumbnails()
                     self._canvas.load_document(self._doc)
                 elif result >= 0:
                     self._canvas.set_tool(None)
                     self._canvas.refresh_page(result)
                     self._canvas.viewport().update()
-                self._mark_modified()  # Redo re-applies the change
+                self._mark_modified()
 
     def closeEvent(self, event) -> None:
-        if self._confirm_discard():
-            event.accept()
-        else:
-            event.ignore()
+        for i, tab in enumerate(self._tabs):
+            if tab.modified:
+                self._tab_widget.setCurrentIndex(i)
+                # currentChanged fires → _on_tab_changed → _tab_idx = i
+                if not self._confirm_discard():
+                    event.ignore()
+                    return
+        for tab in self._tabs:
+            if tab.doc:
+                tab.doc.close()
+        event.accept()
 
-    # ── status bar ────────────────────────────────────────────────────────────
+    # ── status bar / page changed ─────────────────────────────────────────────
 
     def _on_page_changed(self, page_num: int) -> None:
+        # Legacy slot kept for compatibility; per-tab version is _on_canvas_page_changed
         if self._doc:
             self._status_page.setText(f"Page {page_num + 1} / {self._doc.page_count}")
             self._thumb_panel.highlight_page(page_num)
@@ -886,26 +1171,21 @@ class MainWindow(QMainWindow):
     # ── page manipulation ─────────────────────────────────────────────────────
 
     def _on_insert_page_toolbar(self) -> None:
-        """Insert a blank page after the current page (toolbar button)."""
         if not self._doc:
             QMessageBox.warning(self, "No document", "Open a PDF first.")
             return
 
-        # Get current page from canvas (the one being viewed)
         current_page = self._canvas.page_at_scene_pos(self._canvas.mapToScene(self._canvas.viewport().rect().center()))
         if current_page is None:
             current_page = 0
 
-        # Insert after current page
         self._on_page_insert(current_page + 1)
 
     def _on_page_insert(self, index: int) -> None:
-        """Insert a blank page at the specified index."""
         if not self._doc:
             QMessageBox.warning(self, "No document", "Open a PDF first.")
             return
 
-        # Get dimensions from reference page (first page if inserting at 0, else page before)
         ref_index = max(0, min(index - 1, self._doc.page_count - 1))
         if self._doc.page_count > 0:
             width, height = self._doc.get_page_size(ref_index)
@@ -916,21 +1196,14 @@ class MainWindow(QMainWindow):
         self._canvas.push_command(cmd, self._doc)
         self._mark_modified()
 
-        # Refresh the thumbnail panel
         self._thumb_panel.refresh_thumbnails()
-
-        # Refresh canvas to show new page
         self._canvas.load_document(self._doc)
-
-        # Update status
         self._status_page.setText(f"Page 1 / {self._doc.page_count}")
 
     def _on_page_delete(self, index: int) -> None:
-        """Delete the page at the specified index."""
         if not self._doc:
             return
 
-        # Confirm deletion
         reply = QMessageBox.question(
             self,
             "Delete Page",
@@ -946,21 +1219,61 @@ class MainWindow(QMainWindow):
         self._canvas.push_command(cmd, self._doc)
         self._mark_modified()
 
-        # Refresh the thumbnail panel
         self._thumb_panel.refresh_thumbnails()
-
-        # Refresh canvas
         self._canvas.load_document(self._doc)
 
-        # Update status
         if self._doc.page_count > 0:
             current = min(index, self._doc.page_count - 1)
             self._status_page.setText(f"Page {current + 1} / {self._doc.page_count}")
         else:
             self._status_page.setText("No pages")
 
+    def _on_page_resize_from_thumb(self, index: int) -> None:
+        self._open_resize_dialog(index)
+
+    def _open_resize_dialog(self, page_index: int | None) -> None:
+        if not self._doc:
+            QMessageBox.warning(self, "No document", "Open a PDF first.")
+            return
+        from ui.resize_page_dialog import ResizePageDialog
+        from core.history import GroupCmd
+
+        # Determine which page to show current size for
+        if page_index is None:
+            # Use page currently visible in canvas
+            page_index = self._canvas.page_at_scene_pos(
+                self._canvas.mapToScene(self._canvas.viewport().rect().center())
+            ) or 0
+
+        current_w, current_h = self._doc.get_page_size(page_index)
+        dlg = ResizePageDialog(current_w, current_h, self._doc.page_count, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_w, new_h = dlg.target_size_pt
+        mode = dlg.content_mode
+
+        if dlg.apply_all:
+            cmds = [ResizePageCmd(i, new_w, new_h, mode) for i in range(self._doc.page_count)]
+            cmd = GroupCmd(cmds, -1)
+        else:
+            cmd = ResizePageCmd(page_index, new_w, new_h, mode)
+
+        self._canvas.push_command(cmd, self._doc)
+        self._mark_modified()
+        self._thumb_panel.refresh_thumbnails()
+        self._canvas.load_document(self._doc)
+
+    def _on_page_rotate(self, index: int, degrees: int) -> None:
+        if not self._doc:
+            return
+        cmd = RotatePageCmd(index, degrees)
+        self._canvas.push_command(cmd, self._doc)
+        self._mark_modified()
+        self._thumb_panel.refresh_thumbnails()
+        self._canvas.load_document(self._doc)
+
     def _on_page_move(self, from_index: int, to_index: int) -> None:
-        """Move a page from one position to another."""
         if not self._doc:
             return
 
@@ -971,12 +1284,7 @@ class MainWindow(QMainWindow):
         self._canvas.push_command(cmd, self._doc)
         self._mark_modified()
 
-        # Refresh the thumbnail panel
         self._thumb_panel.refresh_thumbnails()
-
-        # Refresh canvas
         self._canvas.load_document(self._doc)
-
-        # Highlight the moved page
         self._thumb_panel.highlight_page(to_index)
         self._status_page.setText(f"Page {to_index + 1} / {self._doc.page_count}")

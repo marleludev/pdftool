@@ -1,3 +1,111 @@
+# Version Notes - PDFTool v0.5.0
+
+**Release Date**: 2026-04-25
+
+## Summary
+
+Page geometry tools and image compression. Pages can now be resized to standard paper formats or custom dimensions (with scale/keep/crop content modes) and rotated 90° in either direction. Embedded images can be downsampled to a target DPI to reduce file size. Highlight annotations now support color selection from a toolbar dropdown. The Properties dialog shows page count and size in mm/inches with standard paper name detection.
+
+---
+
+## New Features
+
+### Highlight Color Picker
+
+- Toolbar highlight button now has a drop-down menu with color swatches: yellow, green, cyan, pink, orange
+- Selected color persists for the session; default remains yellow
+- Color stored in annotation data and applied via `set_colors(stroke=...)` on the fitz annotation
+- `apply_highlight()` in `core/document.py` accepts optional `color` parameter
+
+### Reduce Image DPI (`Document → Reduce Image DPI`)
+
+- Scans all embedded images in the document and reports count and current file size
+- Target DPI spinner (72–600, step 25); live estimate of resulting file size and savings
+- Opaque images re-encoded as JPEG quality 85; transparent images as PNG
+- Only images whose native DPI exceeds the target are downsampled (LANCZOS resampling)
+- Last-used DPI saved to settings (`compressImagesDpi` key)
+
+### Resize Page (`Document → Resize Page` / thumbnail context menu)
+
+- Paper format presets: A2, A3, A4, A5, A6, Letter, Legal, Tabloid, Executive, Custom
+- Portrait / landscape toggle; custom dimensions in mm with live pt preview
+- Apply to current page only or all pages
+- Three content handling modes:
+  - **Scale** — content scaled to fill new dimensions (flattened to XObject)
+  - **Keep** — page box resized, content stays at original coordinates
+  - **Crop** — same as keep; new mediabox clips anything outside
+- Also accessible via right-click on thumbnail → "Resize page…"
+- Full undo support via `ResizePageCmd` (snapshots page bytes before resize)
+
+### Page Rotation
+
+- Right-click thumbnail → "Rotate 90° clockwise" or "Rotate 90° counter-clockwise"
+- Full undo support via `RotatePageCmd`
+- Rotation stored as PDF page rotation (non-destructive)
+
+### Properties Dialog: Page Size Info
+
+- Shows page count and page size for all open documents
+- Size displayed as mm and inches with standard paper name detection (A4, Letter, Legal, etc.)
+- Landscape orientation detected and labeled (e.g. "A4 (landscape)")
+- Mixed page sizes shown as "Various — Page 1: …"
+
+---
+
+## Files Modified
+
+| File | Description |
+|------|-------------|
+| `ui/compress_dialog.py` | New — image DPI scan, estimate, and downsample dialog |
+| `ui/resize_page_dialog.py` | New — page resize dialog with format presets and content mode |
+| `core/document.py` | `resize_page()` method; `apply_highlight()` color parameter |
+| `core/history.py` | `ResizePageCmd`, `RotatePageCmd` added |
+| `tools/annotate.py` | `HighlightTool` accepts color; toolbar color picker dropdown |
+| `ui/mainwindow.py` | Compress/resize actions in Document menu; highlight color picker; page rotate/resize signal wiring |
+| `ui/properties_dialog.py` | Page count and size display with paper name detection |
+| `ui/thumbnail_panel.py` | Context menu: resize page, rotate CW/CCW; new signals |
+| `VERSION` | Bumped to 0.5.0 |
+
+---
+
+# Version Notes - PDFTool v0.4.0
+
+**Release Date**: 2026-04-24
+
+## Summary
+
+Multi-tab PDF editing and lighter icon style. Multiple PDFs can now be open simultaneously in separate tabs. Icons switched to outline (regular) variants where available and lightened to reduce visual weight.
+
+---
+
+## New Features
+
+### Multi-Tab PDF Editing
+
+- **File → Open** (Ctrl+O): if current tab already has a document, the new file opens in a new tab; if current tab is empty, it loads there
+- **Multiple file select**: the open dialog now accepts multiple files — each opens in its own tab
+- **Tab close button (×)**: closes the tab; prompts to save if modified; last tab clears content instead of closing
+- **File → Close Tab** (Ctrl+W): same behaviour as the × button
+- **Window close**: checks all modified tabs before quitting — prompts per tab
+- Each tab maintains its own canvas, thumbnail panel, undo/redo history, and document state
+- Tab title shows filename + ` *` when unsaved changes are present
+
+### Lighter Icon Style
+
+- Icons that have a regular (outline) variant in Font Awesome 6 switched from solid (`fa6s`) to regular (`fa6.`): folder-open, floppy-disk, share-from-square, circle-xmark, clipboard, object-group, file, image, pen-to-square, square, hand, trash-can
+- Icon color lightened from `#444444` to `#888888` across all icons
+
+---
+
+## Files Modified
+
+| File | Description |
+|------|-------------|
+| `ui/mainwindow.py` | Tab widget, `_TabState` dataclass, tab management methods, property accessors, icon updates |
+| `VERSION` | Bumped to 0.4.0 |
+
+---
+
 # Version Notes - PDFTool v0.3.0
 
 **Release Date**: 2026-04-24

@@ -43,9 +43,11 @@ def _icon(name: str) -> QIcon:
 
 class ThumbnailPanel(QWidget):
     page_selected = pyqtSignal(int)
-    page_move_requested = pyqtSignal(int, int)  # from_index, to_index
-    page_delete_requested = pyqtSignal(int)  # index
-    page_insert_requested = pyqtSignal(int)  # index (insert before)
+    page_move_requested = pyqtSignal(int, int)   # from_index, to_index
+    page_delete_requested = pyqtSignal(int)       # index
+    page_insert_requested = pyqtSignal(int)       # index (insert before)
+    page_rotate_requested = pyqtSignal(int, int)  # index, degrees (+90 CW / -90 CCW)
+    page_resize_requested = pyqtSignal(int)        # index
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -122,7 +124,22 @@ class ThumbnailPanel(QWidget):
 
             menu.addSeparator()
 
-            # Delete action with icon
+            resize_action = QAction(_icon("resize"), "Resize page…", self)
+            resize_action.triggered.connect(lambda checked, i=index: self.page_resize_requested.emit(i))
+            menu.addAction(resize_action)
+
+            menu.addSeparator()
+
+            rot_cw = QAction(_icon("rotate-right"), "Rotate 90° clockwise", self)
+            rot_cw.triggered.connect(lambda checked, i=index: self.page_rotate_requested.emit(i, 90))
+            menu.addAction(rot_cw)
+
+            rot_ccw = QAction(_icon("rotate-left"), "Rotate 90° counter-clockwise", self)
+            rot_ccw.triggered.connect(lambda checked, i=index: self.page_rotate_requested.emit(i, -90))
+            menu.addAction(rot_ccw)
+
+            menu.addSeparator()
+
             delete_action = QAction(_icon("trash-can"), "Delete page", self)
             delete_action.triggered.connect(lambda: self.page_delete_requested.emit(index))
             menu.addAction(delete_action)
