@@ -302,7 +302,12 @@ class PDFDocument:
             xref: The cross-reference number of the annotation to delete.
         """
         page = self._doc[page_num]
-        annot = page.load_annot(xref)
+        try:
+            annot = page.load_annot(xref)
+        except Exception:
+            # xref may have been invalidated by a prior delete+recreate cycle
+            logger.warning("delete_annotation: xref %d not found on page %d", xref, page_num)
+            return
         if annot:
             page.delete_annot(annot)
             logger.debug("Deleted annotation on page %d (xref=%d)", page_num, xref)
@@ -709,7 +714,7 @@ class PDFDocument:
         Args:
             output_path: Path where the PDF should be saved.
         """
-        self._doc.save(str(output_path), garbage=4, deflate=True)
+        self._doc.save(str(output_path), garbage=1, deflate=True)
         logger.info("Saved PDF to: %s", output_path)
 
     def close(self) -> None:

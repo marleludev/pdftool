@@ -263,29 +263,59 @@ class MoveImageCmd(Command):
 
 
 class MoveImageWithSiblingsCmd(Command):
-    """Move an image, preserving sibling images that share the same page area."""
+    """Move an image by redacting the source then inserting at the new position.
+
+    Avoids delete_image() which corrupts state. Order matters: redacting the
+    source AFTER inserting at the destination would also remove the freshly
+    placed dst image when src and dst rects overlap (small drags). Other
+    images touching the wipe rect are captured and re-inserted so backgrounds
+    and overlapping images are preserved.
+    """
 
     def __init__(self, page_num: int, xref: int,
                  src_rect: list, dst_rect: list,
-                 image_bytes: bytes,
-                 siblings: "list[tuple]") -> None:
+                 image_bytes: bytes) -> None:
         self._page_num = page_num
         self._xref = xref
         self._src_rect = list(src_rect)
         self._dst_rect = list(dst_rect)
         self._bytes = image_bytes
-        self._siblings = siblings  # list of (fitz.Rect, bytes)
 
     def _apply(self, doc: "PDFDocument", wipe_rect: list, place_rect: list) -> None:
+        from tools.select import _extract_image_bytes
         page = doc.get_page(self._page_num)
-        # Insert at destination BEFORE redacting the source; if both rects overlap
-        # the redaction would also erase the freshly inserted image.
-        page.insert_image(fitz.Rect(place_rect), stream=self._bytes, overlay=True)
-        page.add_redact_annot(fitz.Rect(wipe_rect), fill=None)
-        # text=1: keep text; graphics=0: keep drawings; images=1: remove image refs in area
-        page.apply_redactions(images=1, graphics=0, text=1)
-        for r, b in self._siblings:
-            page.insert_image(r, stream=b, overlay=True)
+        wipe_r = fitz.Rect(wipe_rect)
+        place_r = fitz.Rect(place_rect)
+
+        # Capture other images intersecting wipe_r so we can restore them.
+        # PDF_REDACT_IMAGE_REMOVE deletes every image placement whose bbox
+        # touches the redact rect — backgrounds and overlapping images would
+        # otherwise vanish. Skip the image being moved (bbox == wipe_r).
+        siblings: list[tuple[fitz.Rect, bytes]] = []
+        for info in page.get_image_info(xrefs=True):
+            xr = info.get("xref", 0)
+            if not xr:
+                continue
+            r = fitz.Rect(info["bbox"])
+            if r.is_empty or not r.intersects(wipe_r):
+                continue
+            if (abs(r.x0 - wipe_r.x0) < 1.0 and abs(r.y0 - wipe_r.y0) < 1.0
+                and abs(r.x1 - wipe_r.x1) < 1.0 and abs(r.y1 - wipe_r.y1) < 1.0):
+                continue
+            b = _extract_image_bytes(doc._doc, xr)
+            if b is not None:
+                siblings.append((r, b))
+
+        # Redact source FIRST, then insert dst — protects dst from redaction
+        # when src/dst overlap.
+        if wipe_r.width > 0 and wipe_r.height > 0:
+            page.add_redact_annot(wipe_r, fill=None)
+            page.apply_redactions(images=1, graphics=0, text=1)
+            for r, b in siblings:
+                page.insert_image(r, stream=b, overlay=True)
+
+        if place_r.width > 0 and place_r.height > 0:
+            page.insert_image(place_r, stream=self._bytes, overlay=True)
 
     def execute(self, doc: "PDFDocument") -> None:
         self._apply(doc, self._src_rect, self._dst_rect)

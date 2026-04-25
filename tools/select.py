@@ -533,24 +533,23 @@ class SelectTool(AbstractTool):
                 list(new_rect), new_verts,
             )
             self.canvas.push_command(cmd, doc)
+            # Polygon/Ink moves go through delete+recreate, assigning a new xref.
+            # Keep sel in sync so a subsequent move or delete targets the live xref,
+            # not the stale one that was deleted during execute.
+            sel.xref = cmd._xref
             sel.pdf_rect = new_rect
             if sel.snap:
-                # keep snap in sync so a second drag on the same selection
-                # has up-to-date geometry (MoveAnnotCmd may assign a new xref
-                # if delete+recreate was used for Polygon/Ink).
-                sel.snap = dict(sel.snap, rect=list(new_rect), vertices=new_verts)
+                sel.snap = dict(sel.snap, xref=cmd._xref, rect=list(new_rect), vertices=new_verts)
 
         elif sel.obj_type == "image" and sel.xref is not None:
-            page = doc.get_page(sel.page_num)
             img_bytes = _extract_image_bytes(doc._doc, sel.xref)
             if img_bytes is None:
-                return  # extraction failed — abort move to avoid losing the image
-            siblings = self._capture_sibling_images(page, sel.pdf_rect, sel.xref, doc._doc)
+                return
             from core.history import MoveImageWithSiblingsCmd
             cmd = MoveImageWithSiblingsCmd(
                 sel.page_num, sel.xref,
                 list(sel.pdf_rect), list(new_rect),
-                img_bytes, siblings,
+                img_bytes,
             )
             self.canvas.push_command(cmd, doc)
             sel.pdf_rect = new_rect
