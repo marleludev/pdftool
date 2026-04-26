@@ -1,3 +1,145 @@
+# Version Notes - PDFTool v0.6.0
+
+**Release Date**: 2026-04-26
+
+## Summary
+
+Bug fixes, code refactoring, and UI threading. Five critical bugs fixed (atomic PDF save, page-move undo signaling, move_page return value, MovePageCmd page-op classification, and swallowed exceptions). Core modules split into `core/fonts.py`, `core/drawing.py`, and `core/commands/*` package for maintainability. Background save via `QThread` prevents UI freeze on large PDFs. Exception handlers now log details at debug level.
+
+---
+
+## Bug Fixes
+
+### 1. Non-atomic PDF Save
+- **Issue**: Direct fitz save to output file; crash mid-write = corrupt PDF. Also fails when output == input (fitz refuses incremental).
+- **Fix**: Write to temp file in destination dir, then atomic `os.replace()`. Survive crashes, support in-place saves.
+- **File**: `core/document.py:save()`
+
+### 2. MovePageCmd Undo Signal Lost
+- **Issue**: History.undo/redo uses `getattr(cmd, "_page_num")` fallback to `_index` to classify page ops. MovePageCmd has `_from_index`/`_to_index`, no `_index` → returns None → UI thumbnails not refreshed after undo.
+- **Fix**: Add `self._index = to_index` alias so History classifies as page-op (-1), triggering thumbnail refresh.
+- **File**: `core/history.py:MovePageCmd.__init__()`
+
+### 3. move_page Return Value Dead Ternary
+- **Issue**: `return to_index if to_index < from_index else to_index` — both branches identical. Forward moves land at wrong index (off by 1).
+- **Fix**: Return `to_index - 1` for forward moves (page removed first), `to_index` for backward.
+- **File**: `core/document.py:move_page()`
+
+### 4. Swallowed Exceptions
+- **Issue**: 7 bare `except Exception: pass` blocks across document.py/history.py. Real failures (font load, annotation ops, image extraction) invisible to user.
+- **Fix**: All now `logger.debug()` with exception + context.
+- **Files**: `core/document.py` (4), `core/history.py` (3)
+
+### 5. Redundant Code
+- **Issue**: `_capture_annot()` redundant `info = {}` init, then overwrites.
+- **Fix**: Removed redundant line.
+- **File**: `core/history.py:_capture_annot()`
+
+---
+
+## Refactoring: Core Module Split
+
+Extracted font/drawing logic from 858-line `core/document.py` into separate modules for reusability and clarity.
+
+### `core/fonts.py` (169 lines)
+- `_needs_unicode()`, `_find_unicode_font()`
+- `_FAMILY_KEYS`, `_STYLE_MAP`, `_FITZ_BUILTINS`
+- `_int_to_rgb()`, `_builtin_for_name()`
+- New: `resolve_font(fitz_doc, page_num, font_name, text)` — centralized font resolution
+
+### `core/drawing.py` (75 lines)
+- `_shift_point()`, `_shift_drawing()`, `_render_drawing()`
+- Reusable by command modules without importing PDFDocument
+
+### `core/commands/` Package (45 lines init + 618 lines total)
+Split 15 command classes across modules:
+- `annot.py` (92): AddAnnotCmd, DeleteAnnotCmd, MoveAnnotCmd
+- `text.py` (124): AddTextCmd, MoveTextCmd, EditTextCmd, EditParagraphCmd
+- `annot_text.py` (118): AnnotationTextCmd, TransformAnnotTextCmd, DeleteAnnotTextCmd
+- `page.py` (110): InsertPageCmd, DeletePageCmd, MovePageCmd, ResizePageCmd, RotatePageCmd
+- `image.py` (114): MoveImageCmd, MoveImageWithSiblingsCmd, MoveDrawingCmd
+- `group.py` (25): GroupCmd
+
+**Back-compat**: `core/history.py` re-exports all commands at bottom, so legacy `from core.history import EditTextCmd` calls keep working.
+
+### Result
+- `core/document.py`: 858 → **667 lines** (PDFDocument class only)
+- `core/history.py`: 682 → **228 lines** (Command ABC, helpers, History stack)
+- Commands now live in focused modules with clear dependencies
+
+---
+
+## UI: Background Save
+
+PDF save moved off UI thread via `QThread`. Large documents no longer freeze UI.
+
+### New: `ui/save_worker.py` (36 lines)
+- `SaveWorker`: runs `doc.save()` in worker thread
+- Emits `finished(Path)` or `failed(str)` signals
+
+### Modified: `ui/mainwindow.py`
+- `_begin_save(out_path, update_path, blocking)`: Dispatcher; spins local event loop if blocking (for close-confirm dialog)
+- `_save_file()`, `_save_file_as()`: now async (non-blocking)
+- `_on_save_done()`: Updates path, clears modified, updates UI
+- `_on_save_failed()`: Shows error dialog
+- `_set_save_busy()`: Disables save actions, shows wait cursor + "Saving…" status
+- Blocking save in `_confirm_discard()` so unsaved-changes dialog still works
+
+---
+
+## Code Quality
+
+### Exception Logging (7 sites)
+All bare `except` blocks now log at debug level:
+- Font extraction failures
+- Annotation ops (set_border, set_colors, set_opacity, load_annot, delete_annot)
+- Image extraction failures
+- Annotation text operations
+
+### New `core/fonts.py` Public API
+- `resolve_font(fitz_doc, page_num, font_name, text)` — centralized, testable font resolution
+- Previously private; now command modules can reuse without importing PDFDocument
+
+---
+
+## Files Modified
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `VERSION` | +1 | Bumped to 0.6.0 |
+| `core/document.py` | 858→667 | Removed font/drawing helpers; atomic save; exception logging |
+| `core/fonts.py` | +169 | New — font resolution, family maps, Unicode detection |
+| `core/drawing.py` | +75 | New — drawing translate/render helpers |
+| `core/history.py` | 682→228 | Base Command, helpers, History stack; re-exports commands |
+| `core/commands/__init__.py` | +45 | New — re-exports all command classes |
+| `core/commands/annot.py` | +92 | New — annotation commands |
+| `core/commands/text.py` | +124 | New — text commands |
+| `core/commands/annot_text.py` | +118 | New — annotation-text commands |
+| `core/commands/page.py` | +110 | New — page-level commands |
+| `core/commands/image.py` | +114 | New — image/drawing commands |
+| `core/commands/group.py` | +25 | New — group command |
+| `ui/save_worker.py` | +36 | New — QThread-based save |
+| `ui/mainwindow.py` | +~100 | Async save dispatcher, worker signals, exception handling |
+
+---
+
+## Known Issues (Deferred)
+
+1. **DeletePageCmd / ResizePageCmd xref invalidation**: Recreating a page invalidates xrefs from earlier annotations on that page. Subsequent undo/redo on those annotations silent-no-ops. Fix deferred to v0.7 (needs xref-invalidation tracking in History).
+2. **resize_page "crop" vs "keep"**: Both branches identical. Needs design decision; both deferred to v0.7.
+3. **mainwindow.py 1420 lines**: Still oversized. Split deferred to v0.7 (needs careful extraction to avoid regression).
+
+---
+
+## Testing Recommendations
+
+- Atomic save: pull power during large PDF write (temp file should exist, final save rollback)
+- Page move undo: thumbnail panel should refresh after undo
+- Font fallback: test Unicode text on pages with missing embedded fonts
+- Background save: save large PDF, verify UI remains responsive
+
+---
+
 # Version Notes - PDFTool v0.5.0
 
 **Release Date**: 2026-04-25

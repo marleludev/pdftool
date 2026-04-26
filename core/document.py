@@ -1,185 +1,25 @@
 from __future__ import annotations
 
 import logging
-import re
-import subprocess
-from functools import lru_cache
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import fitz
 
+from core.drawing import _render_drawing, _shift_drawing, _shift_point
+from core.fonts import (
+    _builtin_for_name,
+    _FAMILY_KEYS,
+    _find_unicode_font,
+    _int_to_rgb,
+    _needs_unicode,
+    _STYLE_MAP,
+    resolve_font,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _needs_unicode(text: str) -> bool:
-    """Check if text contains characters outside Latin-1 encoding."""
-    try:
-        text.encode("latin-1")
-        return False
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return True
-
-
-@lru_cache(maxsize=1)
-def _find_unicode_font() -> str | None:
-    """Find a system font that supports Unicode characters.
-
-    Uses fc-match to find a suitable font, falling back to common system fonts.
-    Result is cached to avoid repeated subprocess calls.
-
-    Returns:
-        Path to a suitable font file, or None if no font is found.
-    """
-    try:
-        result = subprocess.run(
-            ["fc-match", ":charset=20ac", "--format=%{file}"],
-            capture_output=True,
-            timeout=2,
-        )
-        path = result.stdout.decode().strip()
-        if path and Path(path).exists():
-            logger.debug("Found Unicode font via fc-match: %s", path)
-            return path
-    except Exception as e:
-        logger.debug("fc-match failed: %s", e)
-
-    # Fallback to common system fonts
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
-    ]
-    for candidate in candidates:
-        if Path(candidate).exists():
-            logger.debug("Found Unicode font via fallback: %s", candidate)
-            return candidate
-
-    logger.warning("No Unicode font found")
-    return None
-
-
-# Normalised family name substrings → fitz built-in family key.
-# "nimbus*" are the free PostScript substitutes bundled with Ghostscript/Linux:
-#   NimbusMonoPS ≈ Courier,  NimbusSans ≈ Helvetica,  NimbusR ≈ Times.
-_FAMILY_KEYS = {
-    "helv": ["helvetica", "arial", "nimbussans", "freesans"],
-    "tiro": ["times", "timesnewroman", "nimbusr", "freeserif"],
-    "cour": ["courier", "couriernew", "nimbusmonops", "nimbusmono", "freemono"],
-}
-
-# (is_bold, is_italic) → fitz built-in font name per family.
-# Courier has no oblique built-in so italic maps to regular "cour".
-_STYLE_MAP = {
-    "helv": {(False, False): "helv", (True, False): "hebo", (False, True): "heob", (True, True): "hebo"},
-    "tiro": {(False, False): "tiro", (True, False): "tibo", (False, True): "tiit", (True, True): "tiit"},
-    "cour": {(False, False): "cour", (True, False): "cobo", (False, True): "cour", (True, True): "cobo"},
-}
-
-
-def _int_to_rgb(c: int) -> tuple[float, float, float]:
-    """Convert integer color to RGB float tuple."""
-    return ((c >> 16) & 0xFF) / 255.0, ((c >> 8) & 0xFF) / 255.0, (c & 0xFF) / 255.0
-
-
-def _shift_point(p, dx: float, dy: float):
-    if isinstance(p, fitz.Point):
-        return fitz.Point(p.x + dx, p.y + dy)
-    # tuple/list fallback
-    return fitz.Point(p[0] + dx, p[1] + dy)
-
-
-def _shift_drawing(drw: dict, dx: float, dy: float) -> dict:
-    """Return a new drawing dict with all geometry translated by (dx, dy)."""
-    new_items = []
-    for it in drw.get("items", []):
-        op = it[0]
-        args = []
-        for a in it[1:]:
-            if isinstance(a, fitz.Point):
-                args.append(fitz.Point(a.x + dx, a.y + dy))
-            elif isinstance(a, fitz.Rect):
-                args.append(fitz.Rect(a.x0 + dx, a.y0 + dy, a.x1 + dx, a.y1 + dy))
-            elif isinstance(a, fitz.Quad):
-                args.append(fitz.Quad(
-                    fitz.Point(a.ul.x + dx, a.ul.y + dy),
-                    fitz.Point(a.ur.x + dx, a.ur.y + dy),
-                    fitz.Point(a.ll.x + dx, a.ll.y + dy),
-                    fitz.Point(a.lr.x + dx, a.lr.y + dy),
-                ))
-            else:
-                args.append(a)
-        new_items.append((op, *args))
-    r = fitz.Rect(drw["rect"])
-    shifted = dict(drw)
-    shifted["items"] = new_items
-    shifted["rect"] = fitz.Rect(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy)
-    return shifted
-
-
-def _render_drawing(page: fitz.Page, drw: dict) -> None:
-    """Render a drawing dict onto a page via fitz.Shape."""
-    shape = page.new_shape()
-    for it in drw.get("items", []):
-        op = it[0]
-        try:
-            if op == "l":
-                shape.draw_line(it[1], it[2])
-            elif op == "re":
-                shape.draw_rect(it[1])
-            elif op == "qu":
-                shape.draw_quad(it[1])
-            elif op == "c":
-                shape.draw_bezier(it[1], it[2], it[3], it[4])
-            elif op == "v":
-                # quadratic with implicit first control = start
-                shape.draw_bezier(it[1], it[1], it[2], it[3])
-            elif op == "y":
-                shape.draw_bezier(it[1], it[2], it[3], it[3])
-        except Exception:
-            continue
-    dtype = drw.get("type", "s")
-    color = drw.get("color") if dtype in ("s", "fs", "sf") else None
-    fill = drw.get("fill") if dtype in ("f", "fs", "sf") else None
-    shape.finish(
-        color=color,
-        fill=fill,
-        width=drw.get("width") or 1.0,
-        closePath=drw.get("closePath", False),
-        even_odd=drw.get("even_odd", False),
-    )
-    shape.commit()
-
-
-def _builtin_for_name(name: str) -> str | None:
-    """Map any font name (including PostScript variants) to a fitz built-in identifier.
-
-    PDF span font names often use PostScript conventions that differ from the
-    PDF basefont name: "CourierNewPS-BoldMT", "NimbusMonoPS-Regular", "ArialMT".
-    Simple substring matching fails because "couriernew" appears inside
-    "couriernewpsboldmt" before "couriernewbold" — returning the wrong weight.
-
-    Fix: strip the PostScript markers (PS, MT, OT) first, then detect bold/
-    italic from keywords, then match family — so style is determined before
-    the family lookup, not after.
-    """
-    base = name.split("+")[-1]
-    norm = re.sub(r"(?i)(PS|MT|OT)", "", base)
-    norm = re.sub(r"[-_ ]", "", norm).lower()
-    is_bold   = "bold" in norm
-    is_italic = "italic" in norm or "oblique" in norm
-    # remove style words so only the family name remains for matching
-    family = re.sub(r"(bold|italic|oblique|regular|roman|medium|narrow|cond|light|thin|semi|demi|extra|black)", "", norm)
-    for base_key, variants in _FAMILY_KEYS.items():
-        for v in variants:
-            if v in family or family in v:
-                return _STYLE_MAP[base_key][(is_bold, is_italic)]
-    return None
 
 
 class PDFDocument:
@@ -445,8 +285,8 @@ class PDFDocument:
                 if font_data:
                     logger.debug("Font '%s' loaded from PDF embedding", font_name)
                     return font_data
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("extract_font(xref=%d) failed: %s", xref, e)
 
         return None
 
@@ -522,7 +362,8 @@ class PDFDocument:
         if font_path is not None:
             try:
                 font = fitz.Font(fontbuffer=font_path.read_bytes())
-            except Exception:
+            except Exception as e:
+                logger.debug("Annotation font load failed (%s): %s", font_path, e)
                 font = None
         if font is None:
             font = self._resolve_font(page_num, "helv", text)
@@ -553,16 +394,16 @@ class PDFDocument:
         annot = page.add_rect_annot(fitz.Rect(rect))
         try:
             annot.set_border(width=0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("annot.set_border(0) failed: %s", e)
         try:
             annot.set_colors(stroke=None, fill=None)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("annot.set_colors(None) failed: %s", e)
         try:
             annot.set_opacity(0.0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("annot.set_opacity(0) failed: %s", e)
         r, g, b = color
         annot.set_info(
             title=f"size={fontsize};color={r:.6f},{g:.6f},{b:.6f}",
@@ -659,7 +500,8 @@ class PDFDocument:
         try:
             info = self._doc.extract_image(xref)
             return info.get("image") if info else None
-        except Exception:
+        except Exception as e:
+            logger.debug("extract_image(xref=%d) failed: %s", xref, e)
             return None
 
     def apply_drawing_move(
@@ -684,63 +526,8 @@ class PDFDocument:
     def _resolve_font(
         self, page_num: int, font_name: str, text: str = ""
     ) -> fitz.Font:
-        """Resolve a font name to a fitz.Font object.
-
-        Handles Unicode text, embedded fonts, and system font lookups.
-
-        Args:
-            page_num: Zero-based page index.
-            font_name: Font name or family identifier.
-            text: Optional text content to check for Unicode requirements.
-
-        Returns:
-            A fitz.Font object suitable for rendering the text.
-        """
-        if text and _needs_unicode(text):
-            uf = _find_unicode_font()
-            if uf:
-                return fitz.Font(fontfile=uf)
-
-        _fitz_builtins = {"helv", "hebo", "heob", "tiro", "tibo", "tiit", "cour", "cobo"}
-        if font_name in _fitz_builtins:
-            return fitz.Font(fontname=font_name)
-
-        builtin = _builtin_for_name(font_name)
-        if builtin:
-            return fitz.Font(fontname=builtin)
-
-        # Try embedded font
-        page = self._doc[page_num]
-        clean_name = font_name.split("+")[-1].lower().replace(" ", "")
-        for font_info in page.get_fonts():
-            xref     = font_info[0]
-            basefont = font_info[3]  # /BaseFont
-            fname    = font_info[4]  # font name
-            candidate = (basefont or fname or "").split("+")[-1].lower().replace(" ", "")
-            if not candidate or candidate != clean_name:
-                continue
-            try:
-                _, ext, _, font_data, _ = self._doc.extract_font(xref)
-                if font_data:
-                    return fitz.Font(fontbuffer=font_data)
-            except Exception as e:
-                logger.debug("Failed to extract embedded font: %s", e)
-
-        # System font via fc-match
-        try:
-            result = subprocess.run(
-                ["fc-match", font_name, "--format=%{file}"],
-                capture_output=True,
-                timeout=2,
-            )
-            path = result.stdout.decode().strip()
-            if path and Path(path).exists():
-                return fitz.Font(fontfile=path)
-        except Exception as e:
-            logger.debug("fc-match for font %r failed: %s", font_name, e)
-
-        # Ultimate fallback
-        return fitz.Font(fontname="helv")
+        """Backward-compat wrapper around core.fonts.resolve_font."""
+        return resolve_font(self._doc, page_num, font_name, text)
 
     # ── page operations ───────────────────────────────────────────────────────
 
@@ -787,14 +574,16 @@ class PDFDocument:
 
         Args:
             from_index: Current zero-based index of the page.
-            to_index: Target zero-based index for the page.
+            to_index: Target zero-based index for the page (insert-before semantics).
 
         Returns:
-            The new index of the moved page.
+            The final zero-based index of the moved page after the operation.
+            Forward moves land at to_index - 1 because the page is removed first.
         """
         self._doc.move_page(from_index, to_index)
-        logger.info("Moved page from %d to %d", from_index, to_index)
-        return to_index if to_index < from_index else to_index
+        final_index = to_index - 1 if to_index > from_index else to_index
+        logger.info("Moved page from %d to %d (final %d)", from_index, to_index, final_index)
+        return final_index
 
     def get_page_size(self, page_num: int) -> tuple[float, float]:
         """Get the dimensions of a page.
@@ -843,12 +632,33 @@ class PDFDocument:
     # ── persist ───────────────────────────────────────────────────────────────
 
     def save(self, output_path: Path) -> None:
-        """Save the document to a file.
+        """Save the document atomically to a file.
+
+        Writes to a temp file in the destination directory, then atomically
+        replaces the target. Survives crashes and supports in-place saves
+        (fitz refuses direct writes when output_path == self.path).
 
         Args:
             output_path: Path where the PDF should be saved.
         """
-        self._doc.save(str(output_path), garbage=1, deflate=True)
+        output_path = Path(output_path)
+        output_dir = output_path.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.", suffix=".tmp", dir=output_dir
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            self._doc.save(str(tmp_path), garbage=1, deflate=True)
+            os.replace(tmp_path, output_path)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception as cleanup_exc:
+                logger.debug("Failed to clean tmp save file %s: %s", tmp_path, cleanup_exc)
+            raise
         logger.info("Saved PDF to: %s", output_path)
 
     def close(self) -> None:

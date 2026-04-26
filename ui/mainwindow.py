@@ -7,7 +7,7 @@ from pathlib import Path
 
 import fitz
 from PIL import Image
-from PyQt6.QtCore import Qt, QBuffer, QIODevice, QSettings
+from PyQt6.QtCore import Qt, QBuffer, QEventLoop, QIODevice, QSettings, QThread
 from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -38,6 +38,7 @@ from tools.annotation_text import AnnotationTextTool
 from tools.text_edit import TextEditLineTool, TextEditTool
 from ui.canvas import PDFCanvas
 from ui.properties_dialog import PropertiesDialog
+from ui.save_worker import SaveWorker
 from ui.thumbnail_panel import ThumbnailPanel
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,11 @@ class MainWindow(QMainWindow):
         self._brush_smoothness: str = "normal"
         self._brush_close_path: bool = False
         self._encircle_color: tuple[float, float, float] = (0.8, 0.0, 0.0)  # red default
+
+        # Background save state
+        self._save_thread: QThread | None = None
+        self._save_worker: SaveWorker | None = None
+        self._save_succeeded: bool = False
 
         self._build_ui()
         self._create_actions()
@@ -731,16 +737,8 @@ class MainWindow(QMainWindow):
         if not self._doc:
             return
         self._commit_active_tool()
-        try:
-            out = self._doc.path.with_stem(self._doc.path.stem + "_edited")
-            self._doc.save(out)
-            self._doc.path = out
-            self._clear_modified()
-            self._update_tab_title()
-            self._add_to_recent(str(out))
-            QMessageBox.information(self, "Saved", f"Saved to:\n{out}")
-        except Exception as exc:
-            QMessageBox.critical(self, "Save error", str(exc))
+        out = self._doc.path.with_stem(self._doc.path.stem + "_edited")
+        self._begin_save(out, update_path=True, blocking=False)
 
     def _save_file_as(self) -> None:
         if not self._doc:
@@ -751,12 +749,75 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self._commit_active_tool()
-        try:
-            self._doc.save(Path(path))
-            self._clear_modified()
-            QMessageBox.information(self, "Saved", f"Saved to:\n{path}")
-        except Exception as exc:
-            QMessageBox.critical(self, "Save error", str(exc))
+        self._begin_save(Path(path), update_path=False, blocking=False)
+
+    def _begin_save(self, out_path: Path, update_path: bool, blocking: bool) -> bool:
+        """Start a background save. If blocking, spin a local event loop until done.
+
+        Returns True on successful kick-off (non-blocking) or successful save
+        (blocking). False if a save is already running or the blocking save
+        failed.
+        """
+        if self._save_thread is not None and self._save_thread.isRunning():
+            QMessageBox.information(self, "Saving", "A save is already in progress.")
+            return False
+
+        self._save_succeeded = False
+        self._set_save_busy(True)
+
+        thread = QThread(self)
+        worker = SaveWorker(self._doc, out_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda p: self._on_save_done(p, update_path))
+        worker.failed.connect(self._on_save_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_save_thread_finished)
+
+        self._save_thread = thread
+        self._save_worker = worker
+
+        if blocking:
+            loop = QEventLoop(self)
+            thread.finished.connect(loop.quit)
+            thread.start()
+            loop.exec()
+            return self._save_succeeded
+
+        thread.start()
+        return True
+
+    def _on_save_done(self, out_path, update_path: bool) -> None:
+        out = Path(out_path)
+        self._save_succeeded = True
+        if update_path:
+            self._doc.path = out
+            self._update_tab_title()
+        self._clear_modified()
+        self._add_to_recent(str(out))
+        self._set_save_busy(False)
+        QMessageBox.information(self, "Saved", f"Saved to:\n{out}")
+
+    def _on_save_failed(self, msg: str) -> None:
+        self._save_succeeded = False
+        self._set_save_busy(False)
+        QMessageBox.critical(self, "Save error", msg)
+
+    def _on_save_thread_finished(self) -> None:
+        self._save_thread = None
+        self._save_worker = None
+
+    def _set_save_busy(self, busy: bool) -> None:
+        self._act_save.setEnabled(not busy)
+        self._act_save_as.setEnabled(not busy)
+        if busy:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self._status_page.setText("Saving…")
+        else:
+            QApplication.restoreOverrideCursor()
 
     def _close_document(self) -> None:
         """Close document in current tab, reset tab to empty state."""
@@ -1231,8 +1292,9 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Save,
         )
         if ans == QMessageBox.StandardButton.Save:
-            self._save_file()
-            return True
+            self._commit_active_tool()
+            out = self._doc.path.with_stem(self._doc.path.stem + "_edited")
+            return self._begin_save(out, update_path=True, blocking=True)
         return ans == QMessageBox.StandardButton.Discard
 
     # ── document properties ───────────────────────────────────────────────────
