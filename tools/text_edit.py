@@ -19,11 +19,12 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
 )
 
-from core.history import EditTextCmd
+from core.history import EditParagraphCmd, EditTextCmd
 from tools.base import AbstractTool
 
 if TYPE_CHECKING:
@@ -105,10 +106,12 @@ def _avg_char_pitch(chars: list) -> float | None:
 # ── dialog ────────────────────────────────────────────────────────────────────
 
 class TextEditDialog(QDialog):
-    def __init__(self, span: dict, font_bytes: bytes | None, parent=None) -> None:
+    def __init__(self, span: dict, font_bytes: bytes | None, parent=None,
+                 multi_line: bool = True) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Text")
         self.setMinimumWidth(460)
+        self._multi_line = multi_line
 
         self._orig_font_bytes   = font_bytes
         self._system_font_bytes: bytes | None = None
@@ -123,12 +126,14 @@ class TextEditDialog(QDialog):
         edit_box = QGroupBox("Edit")
         form = QFormLayout(edit_box)
 
-        # rawdict spans don't always carry a top-level "text" key; reconstruct
-        # from individual char entries so the field is never blank.
         current_text = span.get("text") or "".join(
             ch.get("c", "") for ch in span.get("chars", [])
         )
-        self._text_edit = QLineEdit(current_text)
+        if self._multi_line:
+            self._text_edit = QPlainTextEdit(current_text)
+            self._text_edit.setMinimumHeight(120)
+        else:
+            self._text_edit = QLineEdit(current_text)
         form.addRow("Text:", self._text_edit)
 
         self._orig_font_name = span.get("font", "helv")
@@ -263,6 +268,8 @@ class TextEditDialog(QDialog):
 
     @property
     def result_text(self) -> str:
+        if isinstance(self._text_edit, QPlainTextEdit):
+            return self._text_edit.toPlainText()
         return self._text_edit.text()
 
     @property
@@ -302,13 +309,158 @@ class TextEditTool(AbstractTool):
     def on_press(self, page_num: int, pdf_pos: fitz.Point, scene_pos: QPointF, event: QMouseEvent) -> None:
         if not self.canvas.document:
             return
+        para = self._find_paragraph(page_num, pdf_pos)
+        if para is None:
+            return
+
+        font_bytes = self.canvas.document.get_span_font_bytes(page_num, para.get("font", ""))
+
+        dlg = TextEditDialog(para, font_bytes, parent=self.canvas)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        cmd = EditParagraphCmd(
+            page_num,
+            para["bbox"],
+            para["_lines"],
+            dlg.result_text, dlg.result_size,
+            dlg.result_font, dlg.result_color, dlg.result_font_bytes,
+        )
+        self.canvas.push_command(cmd, self.canvas.document)
+        self.canvas.refresh_page(page_num)
+
+    def _find_paragraph(self, page_num: int, pdf_pos: fitz.Point) -> dict | None:
+        """Return a paragraph at pdf_pos as a span-shaped dict.
+
+        MuPDF's block grouping often splits a visual paragraph across multiple
+        blocks. Ignore that and assemble the paragraph by walking adjacent
+        lines (in y order) until the vertical gap exceeds a line-height
+        threshold or x-extent stops overlapping (column boundary).
+        """
+        page = self.canvas.document.get_page(page_num)
+        all_lines: list[dict] = []
+        for block in page.get_text("rawdict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            for line in block["lines"]:
+                if line.get("spans"):
+                    all_lines.append(line)
+        if not all_lines:
+            return None
+        all_lines.sort(key=lambda ln: ln["bbox"][1])
+
+        hit_idx = None
+        for i, ln in enumerate(all_lines):
+            if fitz.Rect(ln["bbox"]).contains(pdf_pos):
+                hit_idx = i
+                break
+        if hit_idx is None:
+            # Lenient: click in the line's vertical band and near its x-range.
+            for i, ln in enumerate(all_lines):
+                x0, y0, x1, y1 = ln["bbox"]
+                if x0 - 5 <= pdf_pos.x <= x1 + 5 and y0 - 2 <= pdf_pos.y <= y1 + 2:
+                    hit_idx = i
+                    break
+        if hit_idx is None:
+            return None
+
+        hit = all_lines[hit_idx]
+        hit_h = max(hit["bbox"][3] - hit["bbox"][1], 1.0)
+        gap_thresh = hit_h * 0.8  # gap > 80% of line height = paragraph break
+
+        def _x_overlap(a: list, b: list) -> bool:
+            return min(a[2], b[2]) - max(a[0], b[0]) > 0.0
+
+        start = hit_idx
+        while start > 0:
+            prev = all_lines[start - 1]
+            gap = all_lines[start]["bbox"][1] - prev["bbox"][3]
+            if gap > gap_thresh or not _x_overlap(prev["bbox"], hit["bbox"]):
+                break
+            start -= 1
+        end = hit_idx
+        while end < len(all_lines) - 1:
+            nxt = all_lines[end + 1]
+            gap = nxt["bbox"][1] - all_lines[end]["bbox"][3]
+            if gap > gap_thresh or not _x_overlap(nxt["bbox"], hit["bbox"]):
+                break
+            end += 1
+
+        para_lines = all_lines[start:end + 1]
+        bbox = fitz.Rect()
+        for ln in para_lines:
+            bbox |= fitz.Rect(ln["bbox"])
+        synthetic = {
+            "bbox": [bbox.x0, bbox.y0, bbox.x1, bbox.y1],
+            "lines": para_lines,
+        }
+        return _build_paragraph(synthetic)
+
+
+def _build_paragraph(block: dict) -> dict:
+    """Aggregate a text block into a paragraph dict (span-shaped + extras)."""
+    lines_meta: list[dict] = []
+    text_parts: list[str] = []
+    first_span: dict | None = None
+    first_line: dict | None = None
+    for line in block.get("lines", []):
+        spans = line.get("spans", [])
+        if not spans:
+            continue
+        line_text = "".join(
+            s.get("text") or "".join(ch.get("c", "") for ch in s.get("chars", []))
+            for s in spans
+        )
+        text_parts.append(line_text)
+        s0 = spans[0]
+        c = s0.get("color", 0)
+        color = (
+            ((c >> 16) & 0xFF) / 255.0,
+            ((c >> 8) & 0xFF) / 255.0,
+            (c & 0xFF) / 255.0,
+        )
+        lines_meta.append({
+            "origin": list(s0.get("origin", (block["bbox"][0], block["bbox"][1]))),
+            "text": line_text,
+            "size": s0.get("size", 12.0),
+            "font": s0.get("font", "helv"),
+            "color": color,
+        })
+        if first_span is None:
+            first_span = s0
+            first_line = line
+
+    para = dict(first_span) if first_span else {}
+    para["text"] = "\n".join(text_parts)
+    para["bbox"] = list(block["bbox"])
+    para["_lines"] = lines_meta
+    if first_line is not None:
+        para["_dir"] = first_line.get("dir", (1.0, 0.0))
+        para["_wmode"] = first_line.get("wmode", 0)
+    return para
+
+
+# ── single-span line tool ─────────────────────────────────────────────────────
+
+class TextEditLineTool(AbstractTool):
+    """Edit a single text span (one line / one styling run). Companion to
+    TextEditTool which works at paragraph granularity. Useful when you need
+    to change exactly one run without disturbing the rest of a paragraph.
+    """
+
+    def __init__(self, canvas: "PDFCanvas") -> None:
+        super().__init__(canvas)
+
+    def on_press(self, page_num: int, pdf_pos: fitz.Point, scene_pos: QPointF, event: QMouseEvent) -> None:
+        if not self.canvas.document:
+            return
         span = self._find_span(page_num, pdf_pos)
         if span is None:
             return
 
         font_bytes = self.canvas.document.get_span_font_bytes(page_num, span.get("font", ""))
 
-        dlg = TextEditDialog(span, font_bytes, parent=self.canvas)
+        dlg = TextEditDialog(span, font_bytes, parent=self.canvas, multi_line=False)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -331,8 +483,7 @@ class TextEditTool(AbstractTool):
         self.canvas.refresh_page(page_num)
 
     def _find_span(self, page_num: int, pdf_pos: fitz.Point) -> dict | None:
-        """Return span dict from rawdict (includes chars, ascender, descender, flags)
-        with line-level dir and wmode injected as _dir and _wmode."""
+        """Return the rawdict span containing pdf_pos (with line dir/wmode injected)."""
         page = self.canvas.document.get_page(page_num)
         for block in page.get_text("rawdict")["blocks"]:
             if block.get("type") != 0:
@@ -341,6 +492,9 @@ class TextEditTool(AbstractTool):
                 for span in line["spans"]:
                     if fitz.Rect(span["bbox"]).contains(pdf_pos):
                         result = dict(span)
+                        # rawdict spans omit a top-level text key — synthesize.
+                        if "text" not in result or not result["text"]:
+                            result["text"] = "".join(ch.get("c", "") for ch in result.get("chars", []))
                         result["_dir"]   = line.get("dir", (1.0, 0.0))
                         result["_wmode"] = line.get("wmode", 0)
                         return result

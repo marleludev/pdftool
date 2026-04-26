@@ -34,7 +34,8 @@ from tools.image_insert import ImageInsertTool
 from tools.rect_select import RectangleSelectTool
 from tools.select import SelectTool
 from tools.text_add import TextAddTool
-from tools.text_edit import TextEditTool
+from tools.annotation_text import AnnotationTextTool
+from tools.text_edit import TextEditLineTool, TextEditTool
 from ui.canvas import PDFCanvas
 from ui.properties_dialog import PropertiesDialog
 from ui.thumbnail_panel import ThumbnailPanel
@@ -451,8 +452,14 @@ class MainWindow(QMainWindow):
         self._act_text = QAction(_icon("insert-text"), "Add Text", self, checkable=True)
         self._act_text.setToolTip("Add text box")
 
-        self._act_text_edit = QAction(_icon("document-edit"), "Edit Text", self, checkable=True)
-        self._act_text_edit.setToolTip("Edit existing text")
+        self._act_text_edit = QAction(_icon("document-edit"), "Edit Paragraph", self, checkable=True)
+        self._act_text_edit.setToolTip("Edit a full paragraph (multi-line)")
+
+        self._act_text_edit_line = QAction(_icon("document-edit"), "Edit Line", self, checkable=True)
+        self._act_text_edit_line.setToolTip("Edit a single text line / span")
+
+        self._act_annot_text = QAction(_icon("draw-freehand"), "Annotation Text", self, checkable=True)
+        self._act_annot_text.setToolTip("Drag a wrapping text box (Architects Daughter font, embedded)")
 
         self._act_rect = QAction(_icon("draw-rectangle"), "Rectangle", self, checkable=True)
         self._act_rect.setToolTip("Draw rectangle annotation")
@@ -475,7 +482,7 @@ class MainWindow(QMainWindow):
             shortcut=QKeySequence("Ctrl+Shift+G"))
         self._act_signatures.setToolTip("Manage and place signatures (Ctrl+Shift+G)")
 
-        for act in (self._act_pan, self._act_select, self._act_rect_select, self._act_text, self._act_text_edit, self._act_rect):
+        for act in (self._act_pan, self._act_select, self._act_rect_select, self._act_text, self._act_text_edit, self._act_text_edit_line, self._act_annot_text, self._act_rect):
             tb.addAction(act)
             act.triggered.connect(self._on_tool_selected)
 
@@ -593,6 +600,8 @@ class MainWindow(QMainWindow):
             self._act_rect_select: "rect_select",
             self._act_text: "text",
             self._act_text_edit: "text_edit",
+            self._act_text_edit_line: "text_edit_line",
+            self._act_annot_text: "annot_text",
             self._act_rect: "rect",
             self._act_highlight: "highlight",
             self._act_brush: "brush",
@@ -764,7 +773,7 @@ class MainWindow(QMainWindow):
         tab.canvas._page_rects.clear()
         tab.thumb_panel._list.clear()
         for act in (self._act_select, self._act_rect_select,
-                    self._act_text, self._act_text_edit,
+                    self._act_text, self._act_text_edit, self._act_text_edit_line, self._act_annot_text,
                     self._act_img_file, self._act_img_paste,
                     self._act_insert_page,
                     self._act_send_back, self._act_bring_front,
@@ -1051,7 +1060,7 @@ class MainWindow(QMainWindow):
         can_annotate = unlocked or bool(perms & (fitz.PDF_PERM_ANNOTATE | fitz.PDF_PERM_FORM))
 
         for act in (self._act_select, self._act_rect_select,
-                    self._act_text, self._act_text_edit,
+                    self._act_text, self._act_text_edit, self._act_text_edit_line, self._act_annot_text,
                     self._act_img_file, self._act_img_paste,
                     self._act_insert_page,
                     self._act_send_back, self._act_bring_front,
@@ -1136,6 +1145,10 @@ class MainWindow(QMainWindow):
             self._canvas.set_tool(TextAddTool(self._canvas))
         elif tool_name == "text_edit":
             self._canvas.set_tool(TextEditTool(self._canvas))
+        elif tool_name == "text_edit_line":
+            self._canvas.set_tool(TextEditLineTool(self._canvas))
+        elif tool_name == "annot_text":
+            self._canvas.set_tool(AnnotationTextTool(self._canvas))
         elif tool_name == "rect":
             self._canvas.set_tool(RectAnnotateTool(self._canvas))
         elif tool_name == "highlight":

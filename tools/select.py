@@ -112,7 +112,7 @@ class SelectTool(AbstractTool):
         self._sel.drag_start_pdf = pdf_pos
         self._dragging = True
         self._show_overlay(obj.page_num, obj.pdf_rect)
-        if obj.obj_type == "image":
+        if obj.obj_type == "image" or self._is_freetext(obj):
             self._show_handles(obj.page_num, obj.pdf_rect)
 
     def on_move(self, page_num: int, pdf_pos: fitz.Point, scene_pos: QPointF, event: QMouseEvent) -> None:
@@ -142,7 +142,10 @@ class SelectTool(AbstractTool):
     def on_release(self, page_num: int, pdf_pos: fitz.Point, scene_pos: QPointF, event: QMouseEvent) -> None:
         if self._drag_handle is not None and self._sel is not None and self._drag_orig_rect is not None:
             new_rect = self._compute_resize_rect(pdf_pos, event)
-            self._apply_resize(new_rect)
+            if self._sel.obj_type == "image":
+                self._apply_resize(new_rect)
+            elif self._is_freetext(self._sel):
+                self._apply_annot_resize(new_rect)
             self._drag_handle = None
             self._drag_orig_rect = None
             return
@@ -381,6 +384,59 @@ class SelectTool(AbstractTool):
 
         return fitz.Rect(x0, y0, x1, y1)
 
+    ANNOT_TEXT_MARKER = "PDFTOOL_ANNOT_TEXT"
+
+    @classmethod
+    def _is_annot_text(cls, sel: "_Selection") -> bool:
+        return (sel.obj_type == "annot" and sel.snap is not None
+                and sel.snap.get("subject") == cls.ANNOT_TEXT_MARKER)
+
+    # Backwards-compat alias used by handle/overlay branches.
+    _is_freetext = _is_annot_text
+
+    @staticmethod
+    def _parse_annot_text_meta(snap: dict) -> tuple[str, float, tuple[float, float, float]]:
+        text = snap.get("content", "") or ""
+        size = 12.0
+        color = (0.0, 0.0, 0.0)
+        title = snap.get("title", "") or ""
+        for part in title.split(";"):
+            if part.startswith("size="):
+                try:
+                    size = float(part[5:])
+                except ValueError:
+                    pass
+            elif part.startswith("color="):
+                try:
+                    rgb = part[6:].split(",")
+                    if len(rgb) == 3:
+                        color = (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+                except ValueError:
+                    pass
+        return text, size, color
+
+    def _apply_annot_resize(self, new_rect: fitz.Rect) -> None:
+        sel = self._sel
+        if sel is None or sel.xref is None or self.canvas.document is None:
+            return
+        if not self._is_annot_text(sel) or sel.snap is None:
+            return
+        text, fsize, color = self._parse_annot_text_meta(sel.snap)
+        from core.history import TransformAnnotTextCmd
+        cmd = TransformAnnotTextCmd(
+            sel.page_num, sel.xref,
+            list(sel.pdf_rect), list(new_rect),
+            text, fsize, color,
+        )
+        self.canvas.push_command(cmd, self.canvas.document)
+        sel.pdf_rect = new_rect
+        sel.snap = dict(sel.snap, rect=list(new_rect))
+        self.canvas.refresh_page(sel.page_num)
+        self._clear_overlay()
+        self._clear_handles()
+        self._show_overlay(sel.page_num, sel.pdf_rect)
+        self._show_handles(sel.page_num, sel.pdf_rect)
+
     def _apply_resize(self, new_rect: fitz.Rect) -> None:
         sel = self._sel
         if sel is None or sel.obj_type != "image" or sel.xref is None:
@@ -525,21 +581,33 @@ class SelectTool(AbstractTool):
         doc = self.canvas.document
 
         if sel.obj_type == "annot" and sel.xref is not None and sel.snap is not None:
-            old_verts = sel.snap["vertices"]
-            new_verts = _shift_verts(old_verts, dx, dy)
-            cmd = MoveAnnotCmd(
-                sel.page_num, sel.xref,
-                list(sel.pdf_rect), old_verts,
-                list(new_rect), new_verts,
-            )
-            self.canvas.push_command(cmd, doc)
-            # Polygon/Ink moves go through delete+recreate, assigning a new xref.
-            # Keep sel in sync so a subsequent move or delete targets the live xref,
-            # not the stale one that was deleted during execute.
-            sel.xref = cmd._xref
-            sel.pdf_rect = new_rect
-            if sel.snap:
-                sel.snap = dict(sel.snap, xref=cmd._xref, rect=list(new_rect), vertices=new_verts)
+            if self._is_annot_text(sel):
+                text, fsize, color = self._parse_annot_text_meta(sel.snap)
+                from core.history import TransformAnnotTextCmd
+                cmd = TransformAnnotTextCmd(
+                    sel.page_num, sel.xref,
+                    list(sel.pdf_rect), list(new_rect),
+                    text, fsize, color,
+                )
+                self.canvas.push_command(cmd, doc)
+                sel.pdf_rect = new_rect
+                sel.snap = dict(sel.snap, rect=list(new_rect))
+            else:
+                old_verts = sel.snap["vertices"]
+                new_verts = _shift_verts(old_verts, dx, dy)
+                cmd = MoveAnnotCmd(
+                    sel.page_num, sel.xref,
+                    list(sel.pdf_rect), old_verts,
+                    list(new_rect), new_verts,
+                )
+                self.canvas.push_command(cmd, doc)
+                # Polygon/Ink moves go through delete+recreate, assigning a new xref.
+                # Keep sel in sync so a subsequent move or delete targets the live
+                # xref, not the stale one that was deleted during execute.
+                sel.xref = cmd._xref
+                sel.pdf_rect = new_rect
+                if sel.snap:
+                    sel.snap = dict(sel.snap, xref=cmd._xref, rect=list(new_rect), vertices=new_verts)
 
         elif sel.obj_type == "image" and sel.xref is not None:
             img_bytes = _extract_image_bytes(doc._doc, sel.xref)
@@ -580,7 +648,7 @@ class SelectTool(AbstractTool):
         self._clear_overlay()
         self._clear_handles()
         self._show_overlay(sel.page_num, sel.pdf_rect)
-        if sel.obj_type == "image":
+        if sel.obj_type == "image" or self._is_freetext(sel):
             self._show_handles(sel.page_num, sel.pdf_rect)
 
     def _apply_delete(self) -> None:
@@ -590,8 +658,17 @@ class SelectTool(AbstractTool):
         doc = self.canvas.document
 
         if sel.obj_type == "annot" and sel.snap is not None:
-            cmd = DeleteAnnotCmd(sel.page_num, sel.snap)
-            self.canvas.push_command(cmd, doc)
+            if self._is_annot_text(sel) and sel.xref is not None:
+                text, fsize, color = self._parse_annot_text_meta(sel.snap)
+                from core.history import DeleteAnnotTextCmd
+                cmd = DeleteAnnotTextCmd(
+                    sel.page_num, sel.xref, list(sel.pdf_rect),
+                    text, fsize, color,
+                )
+                self.canvas.push_command(cmd, doc)
+            else:
+                cmd = DeleteAnnotCmd(sel.page_num, sel.snap)
+                self.canvas.push_command(cmd, doc)
 
         elif sel.obj_type == "drawing" and sel.drawing is not None:
             page = doc.get_page(sel.page_num)

@@ -22,6 +22,11 @@ class Command(ABC):
 
 def _capture_annot(annot: fitz.Annot) -> dict:
     """Snapshot all state needed to recreate an annotation."""
+    info = {}
+    try:
+        info = annot.info or {}
+    except Exception:
+        info = {}
     return {
         "type_name": annot.type[1],
         "rect": list(annot.rect),
@@ -30,6 +35,9 @@ def _capture_annot(annot: fitz.Annot) -> dict:
         "vertices": list(annot.vertices) if annot.vertices else [],
         "opacity": annot.opacity,
         "xref": annot.xref,
+        "subject": info.get("subject", ""),
+        "title": info.get("title", ""),
+        "content": info.get("content", ""),
     }
 
 
@@ -376,6 +384,142 @@ class EditTextCmd(Command):
     def undo(self, doc: "PDFDocument") -> None:
         new_bbox = doc.apply_text_edit(self._page_num, self._bbox, self._origin, *self._orig)
         self._bbox = new_bbox
+
+
+def _wipe_rect(page: fitz.Page, rect: list) -> None:
+    page.add_redact_annot(fitz.Rect(rect))
+    page.apply_redactions(images=0, graphics=0, text=0)
+
+
+class AnnotationTextCmd(Command):
+    """Insert annotation text: render the text into the page (with embedded
+    Architects Daughter) and add an invisible Square marker for re-edit.
+    Undo redacts the rect and removes the marker.
+    """
+
+    def __init__(self, page_num: int, rect: list, text: str,
+                 fontsize: float, color: tuple[float, float, float]) -> None:
+        self._page_num = page_num
+        self._rect = list(rect)
+        self._text = text
+        self._fontsize = fontsize
+        self._color = color
+        self._xref: int | None = None
+
+    def execute(self, doc: "PDFDocument") -> None:
+        self._xref = doc.apply_annotation_text(
+            self._page_num, self._rect, self._text, self._fontsize, self._color,
+        )
+
+    def undo(self, doc: "PDFDocument") -> None:
+        page = doc.get_page(self._page_num)
+        _wipe_rect(page, self._rect)
+        if self._xref is not None:
+            try:
+                annot = page.load_annot(self._xref)
+                if annot is not None:
+                    page.delete_annot(annot)
+            except Exception:
+                pass
+
+
+class TransformAnnotTextCmd(Command):
+    """Move or resize an annotation-text marker. Re-renders the text into
+    the new rect so wrapped lines reflow, and updates the marker rect.
+    Undo reverses the transform.
+    """
+
+    def __init__(self, page_num: int, xref: int,
+                 old_rect: list, new_rect: list,
+                 text: str, fontsize: float,
+                 color: tuple[float, float, float]) -> None:
+        self._page_num = page_num
+        self._xref = xref
+        self._old_rect = list(old_rect)
+        self._new_rect = list(new_rect)
+        self._text = text
+        self._fontsize = fontsize
+        self._color = color
+
+    def _apply(self, doc: "PDFDocument", src: list, dst: list) -> None:
+        page = doc.get_page(self._page_num)
+        _wipe_rect(page, src)
+        doc._render_annot_text(self._page_num, dst, self._text, self._fontsize, self._color)
+        try:
+            annot = page.load_annot(self._xref)
+            if annot is not None:
+                annot.set_rect(fitz.Rect(dst))
+                annot.update()
+        except Exception:
+            pass
+
+    def execute(self, doc: "PDFDocument") -> None:
+        self._apply(doc, self._old_rect, self._new_rect)
+
+    def undo(self, doc: "PDFDocument") -> None:
+        self._apply(doc, self._new_rect, self._old_rect)
+
+
+class DeleteAnnotTextCmd(Command):
+    """Delete an annotation-text marker: redact the rect and remove the
+    marker annot. Undo re-renders + re-creates marker.
+    """
+
+    def __init__(self, page_num: int, xref: int, rect: list, text: str,
+                 fontsize: float, color: tuple[float, float, float]) -> None:
+        self._page_num = page_num
+        self._xref = xref
+        self._rect = list(rect)
+        self._text = text
+        self._fontsize = fontsize
+        self._color = color
+
+    def execute(self, doc: "PDFDocument") -> None:
+        page = doc.get_page(self._page_num)
+        _wipe_rect(page, self._rect)
+        try:
+            annot = page.load_annot(self._xref)
+            if annot is not None:
+                page.delete_annot(annot)
+        except Exception:
+            pass
+
+    def undo(self, doc: "PDFDocument") -> None:
+        self._xref = doc.apply_annotation_text(
+            self._page_num, self._rect, self._text, self._fontsize, self._color,
+        )
+
+
+class EditParagraphCmd(Command):
+    """Replace a paragraph (block) with new text. Undo replays the original
+    lines at their original origins so styling and per-line positioning are
+    preserved on revert.
+    """
+
+    def __init__(self, page_num: int, orig_bbox: list, orig_lines: list,
+                 new_text: str, new_size: float, new_font: str,
+                 new_color: tuple[float, float, float],
+                 new_font_bytes: bytes | None) -> None:
+        self._page_num = page_num
+        self._orig_bbox = list(orig_bbox)
+        self._orig_lines = orig_lines
+        self._new_text = new_text
+        self._new_size = new_size
+        self._new_font = new_font
+        self._new_color = new_color
+        self._new_font_bytes = new_font_bytes
+        self._new_bbox: list | None = None
+
+    def execute(self, doc: "PDFDocument") -> None:
+        self._new_bbox = doc.apply_paragraph_edit(
+            self._page_num, self._orig_bbox,
+            self._new_text, self._new_size, self._new_font,
+            self._new_color, self._new_font_bytes,
+        )
+
+    def undo(self, doc: "PDFDocument") -> None:
+        wipe = self._new_bbox or self._orig_bbox
+        doc.apply_paragraph_replay(self._page_num, wipe, self._orig_lines)
 
 
 class InsertPageCmd(Command):

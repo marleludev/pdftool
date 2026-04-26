@@ -501,6 +501,140 @@ class PDFDocument:
         tw.write_text(page, color=color)
         return [text_rect.x0, text_rect.y0, text_rect.x1, text_rect.y1]
 
+    ANNOT_TEXT_MARKER = "PDFTOOL_ANNOT_TEXT"
+
+    def _render_annot_text(
+        self,
+        page_num: int,
+        rect: list,
+        text: str,
+        fontsize: float,
+        color: tuple[float, float, float],
+    ) -> None:
+        """Draw annotation text into the page using Architects Daughter
+        embedded via fontbuffer (so the font travels with the PDF). Falls
+        back to Helvetica when the font is not installed.
+        """
+        from tools.annotation_text import find_annotation_font_path
+        page = self._doc[page_num]
+        font: fitz.Font | None = None
+        font_path = find_annotation_font_path()
+        if font_path is not None:
+            try:
+                font = fitz.Font(fontbuffer=font_path.read_bytes())
+            except Exception:
+                font = None
+        if font is None:
+            font = self._resolve_font(page_num, "helv", text)
+        tw = fitz.TextWriter(page.rect)
+        tw.fill_textbox(fitz.Rect(rect), text, font=font, fontsize=fontsize, align=0)
+        tw.write_text(page, color=color)
+
+    def apply_annotation_text(
+        self,
+        page_num: int,
+        rect: list,
+        text: str,
+        fontsize: float,
+        color: tuple[float, float, float],
+    ) -> int:
+        """Insert annotation text: render the text into the page with the
+        embedded Architects Daughter font, plus an invisible Square annot as
+        a marker so SelectTool can recognise the block for move/resize/edit.
+
+        Marker carries metadata in /T (title) and /Contents:
+          - subject = ANNOT_TEXT_MARKER
+          - title  = "size=<fontsize>;color=<r>,<g>,<b>"
+          - content = original text
+        Returns the marker annot xref.
+        """
+        self._render_annot_text(page_num, rect, text, fontsize, color)
+        page = self._doc[page_num]
+        annot = page.add_rect_annot(fitz.Rect(rect))
+        try:
+            annot.set_border(width=0)
+        except Exception:
+            pass
+        try:
+            annot.set_colors(stroke=None, fill=None)
+        except Exception:
+            pass
+        try:
+            annot.set_opacity(0.0)
+        except Exception:
+            pass
+        r, g, b = color
+        annot.set_info(
+            title=f"size={fontsize};color={r:.6f},{g:.6f},{b:.6f}",
+            content=text,
+            subject=self.ANNOT_TEXT_MARKER,
+        )
+        annot.update()
+        return annot.xref
+
+    def apply_paragraph_edit(
+        self,
+        page_num: int,
+        orig_bbox: list,
+        new_text: str,
+        fontsize: float,
+        font_name: str,
+        color: tuple[float, float, float],
+        font_bytes: bytes | None = None,
+    ) -> list:
+        """Replace a paragraph (block) with new multi-line text.
+
+        Wipes the original block bbox, then renders new_text inside a rect
+        spanning from the block's top-left to the page bottom (so longer
+        replacements don't overflow). Returns the actual rendered bbox for
+        undo tracking.
+        """
+        if font_bytes:
+            try:
+                font = fitz.Font(fontbuffer=font_bytes)
+            except Exception:
+                font = self._resolve_font(page_num, font_name, new_text)
+        else:
+            font = self._resolve_font(page_num, font_name, new_text)
+        page = self._doc[page_num]
+        page.add_redact_annot(fitz.Rect(orig_bbox))
+        page.apply_redactions(images=0, graphics=0, text=0)
+
+        x0, y0, x1, _ = orig_bbox
+        fill_rect = fitz.Rect(x0, y0, x1, page.rect.y1)
+        tw = fitz.TextWriter(page.rect)
+        tw.fill_textbox(fill_rect, new_text, font=font, fontsize=fontsize, align=0)
+        tw.write_text(page, color=color)
+        r = tw.text_rect
+        return [r.x0, r.y0, r.x1, r.y1]
+
+    def apply_paragraph_replay(
+        self,
+        page_num: int,
+        redact_bbox: list,
+        lines: list,
+    ) -> list:
+        """Wipe redact_bbox and re-render a paragraph line-by-line at original
+        origins/styles. Used by EditParagraphCmd.undo to restore the source.
+        Returns the union bbox of replayed lines.
+        """
+        page = self._doc[page_num]
+        page.add_redact_annot(fitz.Rect(redact_bbox))
+        page.apply_redactions(images=0, graphics=0, text=0)
+        union: fitz.Rect | None = None
+        for ln in lines:
+            font = self._resolve_font(page_num, ln["font"], ln["text"])
+            tw = fitz.TextWriter(page.rect)
+            text_rect, _ = tw.append(
+                fitz.Point(ln["origin"][0], ln["origin"][1]),
+                ln["text"], font=font, fontsize=ln["size"],
+            )
+            tw.write_text(page, color=tuple(ln["color"]))
+            union = text_rect if union is None else union | text_rect
+        if union is None:
+            return list(redact_bbox)
+        return [union.x0, union.y0, union.x1, union.y1]
+
     def apply_image_move(
         self,
         page_num: int,
