@@ -2,12 +2,6 @@ from __future__ import annotations
 
 import fitz
 
-try:
-    import qtawesome as qta
-    QTA_AVAILABLE = True
-except ImportError:
-    QTA_AVAILABLE = False
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
@@ -21,14 +15,12 @@ from PyQt6.QtWidgets import (
 )
 
 
+from ui.sprite_icons import sprite_icon
+
+
 def _icon(name: str) -> QIcon:
-    """Get icon from qtawesome."""
-    if QTA_AVAILABLE:
-        try:
-            return qta.icon(f"mdi.{name}", color="#555555")
-        except Exception:
-            pass
-    return QIcon()
+    """Return icon from the SVG sprite (see ui/sprite_icons.py)."""
+    return sprite_icon(name)
 
 
 def _fmt_size(n: int) -> str:

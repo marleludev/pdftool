@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+.env/
+env/
 venv/
 *.egg-info/
 dist/
@@ -12,3 +14,4 @@ build/
 export/
 *.pdf
 *.png
+RESOURCES/

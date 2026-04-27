@@ -3,12 +3,6 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-try:
-    import qtawesome as qta
-    QTA_AVAILABLE = True
-except ImportError:
-    QTA_AVAILABLE = False
-
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
@@ -29,14 +23,12 @@ _PREVIEW_W = 160
 _PREVIEW_H = 96
 
 
+from ui.sprite_icons import sprite_icon
+
+
 def _icon(name: str) -> QIcon:
-    """Get icon from qtawesome."""
-    if QTA_AVAILABLE:
-        try:
-            return qta.icon(f"mdi.{name}", color="#555555")
-        except Exception:
-            pass
-    return QIcon()
+    """Return icon from the SVG sprite (see ui/sprite_icons.py)."""
+    return sprite_icon(name)
 
 
 def sig_path(slot: int) -> Path:

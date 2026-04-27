@@ -38,12 +38,6 @@ def _fmt_page_size(w_pt: float, h_pt: float) -> str:
     base = f"{w_mm:.1f} × {h_mm:.1f} mm  ({w_in:.2f} × {h_in:.2f} in)"
     return f"{name}  —  {base}" if name else base
 
-try:
-    import qtawesome as qta
-    QTA_AVAILABLE = True
-except ImportError:
-    QTA_AVAILABLE = False
-
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QDialog,
@@ -56,14 +50,12 @@ from PyQt6.QtWidgets import (
 )
 
 
+from ui.sprite_icons import sprite_icon
+
+
 def _icon(name: str) -> QIcon:
-    """Get icon from qtawesome."""
-    if QTA_AVAILABLE:
-        try:
-            return qta.icon(f"mdi.{name}", color="#555555")
-        except Exception:
-            pass
-    return QIcon()
+    """Return icon from the SVG sprite (see ui/sprite_icons.py)."""
+    return sprite_icon(name)
 
 
 def _parse_date(d: str) -> str:

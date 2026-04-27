@@ -6,6 +6,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ── Conda guard ───────────────────────────────────────────────────────────────
+# Deactivate any active conda env so build uses the project venv only.
+if [[ -n "${CONDA_DEFAULT_ENV:-}" ]] || [[ -n "${CONDA_PREFIX:-}" ]]; then
+    echo "▸ Conda env detected: ${CONDA_DEFAULT_ENV:-${CONDA_PREFIX}}"
+    if command -v conda &>/dev/null; then
+        eval "$(conda shell.bash hook)" 2>/dev/null || true
+        while [[ -n "${CONDA_DEFAULT_ENV:-}" ]]; do
+            conda deactivate 2>/dev/null || break
+        done
+    fi
+    unset CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER CONDA_SHLVL CONDA_EXE 2>/dev/null || true
+    echo "▸ Conda deactivated for build"
+fi
+
 # ── Venv ──────────────────────────────────────────────────────────────────────
 if [[ ! -f ".venv/bin/activate" ]]; then
     echo "ERROR: .venv not found."
@@ -13,7 +27,7 @@ if [[ ! -f ".venv/bin/activate" ]]; then
     exit 1
 fi
 source .venv/bin/activate
-echo "▸ Python: $(python3 --version)"
+echo "▸ Python: $(python3 --version)  ($(which python3))"
 
 # ── PyInstaller ───────────────────────────────────────────────────────────────
 pip install pyinstaller --quiet
@@ -63,7 +77,7 @@ _DROP_QT = [
     'Qt6SerialBus', 'Qt6SerialPort',
     'Qt6ShaderTools',
     'Qt6Sql',
-    'Qt6Svg', 'Qt6SvgWidgets',
+    'Qt6SvgWidgets',
     'Qt6Test',
     'Qt6TextToSpeech',
     'Qt6VirtualKeyboard',
@@ -76,7 +90,7 @@ _DROP_QT = [
     # Qt platform plugins we don't need
     'qoffscreen', 'qvnc', 'qlinuxfb', 'qminimal', 'qeglfs',
     # Qt image format plugins not used (fitz handles image decoding)
-    'qgif', 'qtiff', 'qwebp', 'qico', 'qsvg',
+    'qgif', 'qtiff', 'qwebp', 'qico',
 ]
 
 # ── Python modules to exclude ─────────────────────────────────────────────────
@@ -93,7 +107,7 @@ _EXCL = [
     'PyQt6.QtRemoteObjects',
     'PyQt6.QtSensors', 'PyQt6.QtSerialBus', 'PyQt6.QtSerialPort',
     'PyQt6.QtSql',
-    'PyQt6.QtSvg', 'PyQt6.QtSvgWidgets',
+    'PyQt6.QtSvgWidgets',
     'PyQt6.QtTest', 'PyQt6.QtTextToSpeech',
     'PyQt6.QtWebChannel', 'PyQt6.QtWebEngineCore',
     'PyQt6.QtWebEngineQuick', 'PyQt6.QtWebEngineWidgets',
@@ -135,9 +149,9 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('pdftool.png', '.'),
-        ('sign.png', '.'),
+        ('PDFtool.svg', '.'),
         ('VERSION', '.'),
+        ('ui/icons/pdf-icons-sprite.svg', 'ui/icons'),
     ] + _mupdf_datas + _qta_datas,
     hiddenimports=[
         'fitz',
@@ -152,6 +166,7 @@ a = Analysis(
         'PyQt6.QtCore',
         'PyQt6.QtGui',
         'PyQt6.QtPrintSupport',
+        'PyQt6.QtSvg',
         'qtawesome',
         'qtawesome.iconic_font',
     ],
@@ -213,7 +228,7 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
-    icon='pdftool.png',
+    icon='PDFtool.svg',
 )
 SPECEOF
 
@@ -222,7 +237,7 @@ echo "▸ Building (may take 1-2 minutes)..."
 pyinstaller pdftool.spec --clean --noconfirm
 
 # ── .desktop launcher ─────────────────────────────────────────────────────────
-ICON_ABS="$SCRIPT_DIR/pdftool.png"
+ICON_ABS="$SCRIPT_DIR/PDFtool.svg"
 cat > dist/pdftool.desktop << EOF
 [Desktop Entry]
 Type=Application
@@ -244,11 +259,11 @@ printf "  Size   : %s\n" "$(du -sh dist/pdftool | cut -f1)"
 echo "══════════════════════════════════════════════════"
 echo "  To install system-wide:"
 echo "    sudo cp dist/pdftool /usr/local/bin/"
-echo "    sudo cp pdftool.png  /usr/local/share/icons/pdftool.png"
+echo "    sudo cp PDFtool.svg  /usr/local/share/icons/PDFtool.svg"
 echo "    sudo cp dist/pdftool.desktop /usr/local/share/applications/"
 echo ""
 echo "  Or user-local:"
 echo "    cp dist/pdftool ~/.local/bin/"
-echo "    cp pdftool.png  ~/.local/share/icons/"
+echo "    cp PDFtool.svg  ~/.local/share/icons/"
 echo "    cp dist/pdftool.desktop ~/.local/share/applications/"
 echo "══════════════════════════════════════════════════"

@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QToolBar,
     QToolButton,
+    QWidget,
 )
 
 from core.document import PDFDocument
@@ -39,78 +41,19 @@ from tools.text_edit import TextEditLineTool, TextEditTool
 from ui.canvas import PDFCanvas
 from ui.properties_dialog import PropertiesDialog
 from ui.save_worker import SaveWorker
+from ui.settings_dialog import SettingsDialog
+from ui.sprite_icons import sprite_icon
 from ui.thumbnail_panel import ThumbnailPanel
 
 logger = logging.getLogger(__name__)
 
 
-# Theme-name → qtawesome Font Awesome 6 Solid icon name (fa6s prefix).
-# Browse glyphs at https://fontawesome.com/v4/icons/ — FA6 covers every FA4
-# icon with renamed keys. Reference rename map:
-# https://fontawesome.com/docs/web/setup/upgrade/whats-changed
-# FA5 Solid not used: Qt6 dedupes "Font Awesome 5 Free" family across weights,
-# breaking solid-only glyphs.
-_QTA: dict[str, str] = {
-    # File ops  (fa6 = regular/outline, fa6s = solid-only)
-    "document-open":           "fa6.folder-open",
-    "document-save":           "fa6.floppy-disk",
-    "document-save-as":        "fa6.share-from-square",
-    "document-close":          "fa6.circle-xmark",
-    "document-open-recent":    "fa6s.clock-rotate-left",
-    "document-properties":     "fa6s.gear",
-    # Edit ops
-    "edit-undo":               "fa6s.rotate-left",
-    "edit-redo":               "fa6s.rotate-right",
-    "edit-paste":              "fa6.clipboard",
-    "edit-select":             "fa6s.arrow-pointer",
-    "edit-rect-select":        "fa6.object-group",
-    "insert-page":             "fa6.file",
-    "insert-text":             "fa6s.font",
-    "insert-image":            "fa6.image",
-    "document-edit":           "fa6.pen-to-square",
-    # Draw / annotate
-    "draw-rectangle":          "fa6.square",
-    "draw-highlight":          "fa6s.paintbrush",
-    "draw-brush":              "fa6s.pen-nib",
-    "draw-encircle":           "fa6s.draw-polygon",
-    "draw-freehand":           "fa6s.pencil",
-    # Tools / nav
-    "transform-move":          "fa6s.up-down-left-right",
-    "input-mouse":             "fa6.hand",
-    # Z-order
-    "object-order-back":       "fa6s.turn-down",
-    "object-order-front":      "fa6s.turn-up",
-    # Zoom
-    "zoom-in":                 "fa6s.magnifying-glass-plus",
-    "zoom-out":                "fa6s.magnifying-glass-minus",
-    "zoom-fit-best":           "fa6s.expand",
-    # Image / scan
-    "scanner":                 "fa6s.camera",
-    "image-x-generic":         "fa6.image",
-    "image-x-raw":             "fa6.image",
-    # Misc
-    "user-trash":              "fa6.trash-can",
-    "application-certificate": "fa6s.certificate",
-    "mail-signed":             "fa6s.signature",
-    "document-encrypt":        "fa6s.lock",
-    "document-unlock":         "fa6s.lock-open",
-}
-
-
-def _qta_icon(name: str) -> QIcon:
-    qta_name = _QTA.get(name)
-    if not qta_name:
-        return QIcon()
-    try:
-        import qtawesome as qta
-        return qta.icon(qta_name, color="#555555")
-    except Exception:
-        return QIcon()
-
-
 def _icon(theme: str, fallback_sp=None) -> QIcon:
-    """Return qtawesome icon; fall back to theme then QStyle standard pixmap."""
-    ic = _qta_icon(theme)
+    """Return sprite icon; fall back to theme then QStyle standard pixmap.
+
+    Names map to sprite symbol ids in `ui/sprite_icons.py::_NAME_TO_SYMBOL`.
+    """
+    ic = sprite_icon(theme)
     if not ic.isNull():
         return ic
     ic = QIcon.fromTheme(theme)
@@ -124,9 +67,9 @@ def _icon(theme: str, fallback_sp=None) -> QIcon:
 
 
 def _icon_any(*names: str) -> QIcon:
-    """Return first non-null qtawesome icon, then fallback to theme icons."""
+    """Return first non-null sprite icon, then fall back to theme icons."""
     for name in names:
-        ic = _qta_icon(name)
+        ic = sprite_icon(name)
         if not ic.isNull():
             return ic
     for name in names:
@@ -194,12 +137,12 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        _icon_path = Path(__file__).parent.parent / "pdftool.png"
+        _icon_path = Path(__file__).parent.parent / "PDFtool.svg"
         if _icon_path.exists():
             self.setWindowIcon(QIcon(str(_icon_path)))
         _ver = QApplication.applicationVersion()
         if _ver:
-            self.setWindowTitle(f"PDF Tool {_ver}")
+            self._set_title_text(f"PDF Tool {_ver}")
         self.resize(1280, 900)
 
         self._tabs: list[_TabState] = []
@@ -220,9 +163,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._create_actions()
         self._build_menus()
-        self._build_toolbar()
+        self._build_tools_toolbar()
         self._connect_signals()
         self._rebuild_recent_menu()
+
+    def _set_title_text(self, text: str) -> None:
+        """Update window title."""
+        self.setWindowTitle(text)
 
     def _create_actions(self) -> None:
         """Create actions that are used in menus and toolbar."""
@@ -296,7 +243,7 @@ class MainWindow(QMainWindow):
         self._tab_widget.setTabText(idx, name + suffix)
         if idx == self._tab_idx:
             base = f"PDF Tool — {name}" if tab.doc else "PDF Tool"
-            self.setWindowTitle(base + suffix)
+            self._set_title_text(base + suffix)
 
     # ── tab event handlers ────────────────────────────────────────────────────
 
@@ -381,11 +328,15 @@ class MainWindow(QMainWindow):
         self._act_redo = QAction(_icon("edit-redo", SP.SP_ArrowForward), "&Redo", self, shortcut=QKeySequence.StandardKey.Redo)
         self._act_img_paste = QAction(_icon("edit-paste"), "&Paste Image", self, shortcut=QKeySequence.StandardKey.Paste)
         self._act_img_paste.setToolTip("Paste image from clipboard (click to place)")
+        self._act_preferences = QAction(_icon("preferences-other"), "&Preferences…", self, shortcut=QKeySequence("Ctrl+,"))
+        self._act_preferences.setToolTip("Text annotation defaults (font, size)")
         edit_menu.addActions([self._act_undo, self._act_redo])
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_img_paste)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_insert_page)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._act_preferences)
 
         doc_menu = mb.addMenu("&Document")
         self._act_properties = QAction(
@@ -438,7 +389,8 @@ class MainWindow(QMainWindow):
         self._act_fit      = QAction(_icon("zoom-fit-best"), "Fit &Width", self, shortcut=QKeySequence("Ctrl+0"))
         view_menu.addActions([self._act_zoom_in, self._act_zoom_out, self._act_fit])
 
-    def _build_toolbar(self) -> None:
+    def _build_tools_toolbar(self) -> None:
+        """Create tools toolbar with all editing actions."""
         tb = QToolBar("Tools", self)
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -475,8 +427,8 @@ class MainWindow(QMainWindow):
 
         self._act_send_back  = QAction(_icon("object-order-back"),  "Send to Back",    self, shortcut=QKeySequence("["))
         self._act_bring_front = QAction(_icon("object-order-front"), "Bring to Front",  self, shortcut=QKeySequence("]"))
-        self._act_send_back.setToolTip("Send selected image behind all other content  [")
-        self._act_bring_front.setToolTip("Bring selected image in front of all other content  ]")
+        self._act_send_back.setToolTip("Send selected object behind all other content (images/annotations)  [")
+        self._act_bring_front.setToolTip("Bring selected object in front of all other content (images/annotations)  ]")
 
         self._act_img_file = QAction(_icon("insert-image"), "Insert Image", self,
                                      shortcut=QKeySequence("Ctrl+Shift+I"))
@@ -622,6 +574,7 @@ class MainWindow(QMainWindow):
         self._act_undo.triggered.connect(self._undo)
         self._act_redo.triggered.connect(self._redo)
         self._act_properties.triggered.connect(self._edit_properties)
+        self._act_preferences.triggered.connect(self._open_preferences)
         # Lambdas so property is evaluated at call time, not connection time
         self._act_zoom_in.triggered.connect(lambda: self._canvas.zoom_in())
         self._act_zoom_out.triggered.connect(lambda: self._canvas.zoom_out())
@@ -873,8 +826,15 @@ class MainWindow(QMainWindow):
 
     def _image_zorder(self, to_back: bool) -> None:
         tool = self._canvas._current_tool
-        if isinstance(tool, SelectTool):
+        if not isinstance(tool, SelectTool) or tool._sel is None:
+            return
+        sel = tool._sel
+        if sel.obj_type == "image":
             tool.set_image_zorder(to_back)
+        elif sel.obj_type == "annot":
+            tool.set_annot_zorder(to_back)
+        elif sel.obj_type == "drawing":
+            tool.set_drawing_zorder(to_back)
 
     def _insert_image_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1306,10 +1266,11 @@ class MainWindow(QMainWindow):
         dlg = PropertiesDialog(self._doc._doc.metadata, pages=pages, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        merged = dict(self._doc._doc.metadata)
-        merged.update(dlg.result_meta)
-        self._doc._doc.set_metadata(merged)
-        self._mark_modified()
+
+    def _open_preferences(self) -> None:
+        """Open preferences dialog for text annotation defaults."""
+        dlg = SettingsDialog(self)
+        dlg.exec()
 
     # ── edit ─────────────────────────────────────────────────────────────────
 

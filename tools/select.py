@@ -8,7 +8,7 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent, QPen
 from PyQt6.QtWidgets import QGraphicsRectItem
 
-from core.history import DeleteAnnotCmd, MoveAnnotCmd, MoveTextCmd, _capture_annot
+from core.history import DeleteAnnotCmd, MoveAnnotCmd, MoveTextCmd, _capture_annot, _recreate_annot
 from tools._drawing_surgery import strip_drawing
 from tools.base import AbstractTool
 
@@ -493,6 +493,88 @@ class SelectTool(AbstractTool):
             self._show_overlay(sel.page_num, sel.pdf_rect)
             self._show_handles(sel.page_num, sel.pdf_rect)
 
+    def set_drawing_zorder(self, to_back: bool) -> None:
+        """Strip selected drawing from content stream and redraw with overlay flag.
+
+        overlay=True: appended to end of stream → on top.
+        overlay=False: prepended → behind existing content.
+        """
+        sel = self._sel
+        if sel is None or sel.obj_type != "drawing" or sel.drawing is None:
+            return
+        doc = self.canvas.document
+        if doc is None:
+            return
+        page = doc.get_page(sel.page_num)
+        drw = sel.drawing
+        if not strip_drawing(doc._doc, page, drw):
+            return
+        shape = page.new_shape()
+        SelectTool._draw_items(shape, drw, 0.0, 0.0)
+        shape.finish(
+            color=drw.get("color"),
+            fill=drw.get("fill"),
+            width=drw.get("width") or 1,
+            dashes=drw.get("dashes"),
+            even_odd=drw.get("even_odd", False),
+            closePath=drw.get("closePath", False),
+        )
+        shape.commit(overlay=not to_back)
+        self.canvas.document_modified.emit()
+        self.canvas.refresh_page(sel.page_num)
+        self._clear_overlay()
+        self._show_overlay(sel.page_num, sel.pdf_rect)
+
+    def set_annot_zorder(self, to_back: bool) -> None:
+        """Reorder selected annotation in the page's /Annots array.
+
+        Annotations render in array order — last entry sits on top. Reorder by
+        snapshotting all annots, deleting them, and recreating in new order.
+        """
+        sel = self._sel
+        if sel is None or sel.obj_type != "annot" or sel.xref is None:
+            return
+        doc = self.canvas.document
+        if doc is None:
+            return
+        page = doc.get_page(sel.page_num)
+
+        all_snaps: list[dict] = []
+        selected_idx = -1
+        for i, annot in enumerate(page.annots()):
+            snap = _capture_annot(annot)
+            all_snaps.append(snap)
+            if annot.xref == sel.xref:
+                selected_idx = i
+        if selected_idx < 0 or len(all_snaps) < 2:
+            return
+
+        selected_snap = all_snaps[selected_idx]
+        other_snaps = [s for i, s in enumerate(all_snaps) if i != selected_idx]
+
+        for annot in list(page.annots()):
+            page.delete_annot(annot)
+
+        if to_back:
+            new_xref = _recreate_annot(page, selected_snap)
+            for snap in other_snaps:
+                _recreate_annot(page, snap)
+        else:
+            for snap in other_snaps:
+                _recreate_annot(page, snap)
+            new_xref = _recreate_annot(page, selected_snap)
+
+        sel.xref = new_xref
+        if sel.snap is not None:
+            sel.snap = dict(sel.snap, xref=new_xref)
+        self.canvas.document_modified.emit()
+        self.canvas.refresh_page(sel.page_num)
+        self._clear_overlay()
+        self._clear_handles()
+        self._show_overlay(sel.page_num, sel.pdf_rect)
+        if self._is_freetext(sel):
+            self._show_handles(sel.page_num, sel.pdf_rect)
+
     # ── drawing helpers ───────────────────────────────────────────────────────
 
     @staticmethod
@@ -559,14 +641,14 @@ class SelectTool(AbstractTool):
     def _capture_sibling_images(
         page: fitz.Page, rect: fitz.Rect, skip_xref: int, doc: fitz.Document,
     ) -> list[tuple[fitz.Rect, bytes]]:
-        """Return (bbox, raw_bytes) for images fully inside rect, excluding skip_xref."""
+        """Return (bbox, raw_bytes) for images intersecting rect, excluding skip_xref."""
         out: list[tuple[fitz.Rect, bytes]] = []
         for info in page.get_image_info(xrefs=True):
             xr = info.get("xref", 0)
             if not xr or xr == skip_xref:
                 continue
             r = fitz.Rect(info["bbox"])
-            if rect.contains(r):
+            if rect.intersects(r):
                 b = _extract_image_bytes(doc, xr)
                 if b is not None:
                     out.append((r, b))

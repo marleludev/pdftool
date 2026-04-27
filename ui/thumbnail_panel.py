@@ -3,12 +3,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-try:
-    import qtawesome as qta
-    QTA_AVAILABLE = True
-except ImportError:
-    QTA_AVAILABLE = False
-
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -31,14 +25,12 @@ THUMB_WIDTH = 160
 THUMB_SCALE = 0.3
 
 
+from ui.sprite_icons import sprite_icon
+
+
 def _icon(name: str) -> QIcon:
-    """Get icon from qtawesome."""
-    if QTA_AVAILABLE:
-        try:
-            return qta.icon(f"mdi.{name}", color="#555555")
-        except Exception:
-            pass
-    return QIcon()
+    """Return icon from the SVG sprite (see ui/sprite_icons.py)."""
+    return sprite_icon(name)
 
 
 class ThumbnailPanel(QWidget):

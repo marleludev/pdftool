@@ -29,7 +29,7 @@ _DROP_QT = [
     'Qt6SerialBus', 'Qt6SerialPort',
     'Qt6ShaderTools',
     'Qt6Sql',
-    'Qt6Svg', 'Qt6SvgWidgets',
+    'Qt6SvgWidgets',
     'Qt6Test',
     'Qt6TextToSpeech',
     'Qt6VirtualKeyboard',
@@ -42,7 +42,7 @@ _DROP_QT = [
     # Qt platform plugins we don't need
     'qoffscreen', 'qvnc', 'qlinuxfb', 'qminimal', 'qeglfs',
     # Qt image format plugins not used (fitz handles image decoding)
-    'qgif', 'qtiff', 'qwebp', 'qico', 'qsvg',
+    'qgif', 'qtiff', 'qwebp', 'qico',
 ]
 
 # ── Python modules to exclude ─────────────────────────────────────────────────
@@ -59,7 +59,7 @@ _EXCL = [
     'PyQt6.QtRemoteObjects',
     'PyQt6.QtSensors', 'PyQt6.QtSerialBus', 'PyQt6.QtSerialPort',
     'PyQt6.QtSql',
-    'PyQt6.QtSvg', 'PyQt6.QtSvgWidgets',
+    'PyQt6.QtSvgWidgets',
     'PyQt6.QtTest', 'PyQt6.QtTextToSpeech',
     'PyQt6.QtWebChannel', 'PyQt6.QtWebEngineCore',
     'PyQt6.QtWebEngineQuick', 'PyQt6.QtWebEngineWidgets',
@@ -101,9 +101,9 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('pdftool.png', '.'),
-        ('sign.png', '.'),
+        ('PDFtool.svg', '.'),
         ('VERSION', '.'),
+        ('ui/icons/pdf-icons-sprite.svg', 'ui/icons'),
     ] + _mupdf_datas + _qta_datas,
     hiddenimports=[
         'fitz',
@@ -118,6 +118,7 @@ a = Analysis(
         'PyQt6.QtCore',
         'PyQt6.QtGui',
         'PyQt6.QtPrintSupport',
+        'PyQt6.QtSvg',
         'qtawesome',
         'qtawesome.iconic_font',
     ],
@@ -179,5 +180,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
-    icon='pdftool.png',
+    icon='PDFtool.svg',
 )

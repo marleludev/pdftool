@@ -75,7 +75,7 @@ def main() -> None:
     app.setApplicationName("PDFTool")
     app.setOrganizationName("PDFTOOL")
     app.setApplicationVersion(_read_version())
-    icon_path = Path(__file__).parent / "pdftool.png"
+    icon_path = Path(__file__).parent / "PDFtool.svg"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()

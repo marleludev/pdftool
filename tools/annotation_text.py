@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import fitz
-from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt, QSettings
 from PyQt6.QtGui import QColor, QMouseEvent, QPen
 from PyQt6.QtWidgets import (
     QColorDialog,
@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGraphicsRectItem,
+    QLabel,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
@@ -63,6 +64,11 @@ class AnnotationTextDialog(QDialog):
         self.setMinimumWidth(420)
         self._color: tuple[float, float, float] = (0.15, 0.15, 0.75)
 
+        # Load saved preferences
+        settings = QSettings("PDFTool", "PDFTool")
+        self._saved_font = settings.value("annotationFont", "DejaVu Sans", str)
+        self._saved_size = settings.value("annotationFontSize", 12.0, float)
+
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
@@ -71,10 +77,14 @@ class AnnotationTextDialog(QDialog):
         self._text_edit.setPlaceholderText("Type annotation text…")
         form.addRow("Text:", self._text_edit)
 
+        self._font_label = QLabel(self._saved_font)
+        self._font_label.setStyleSheet("color: #666; font-size: 11px;")
+        form.addRow("Font:", self._font_label)
+
         self._size_spin = QDoubleSpinBox()
         self._size_spin.setRange(4.0, 200.0)
         self._size_spin.setSingleStep(0.5)
-        self._size_spin.setValue(12.0)
+        self._size_spin.setValue(self._saved_size)
         form.addRow("Size (pt):", self._size_spin)
 
         self._color_btn = QPushButton()
